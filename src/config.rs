@@ -12,6 +12,10 @@
 //! ```
 //! All keys optional; unknown keys are an error (catches typos). CLI arguments
 //! override config values; config values override built-in defaults.
+//!
+//! A relative `library_path` is resolved against the directory containing the
+//! config file (not the current directory), so the configured library does not
+//! depend on where liner is run from. `~` is not expanded.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -103,13 +107,32 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
         },
     };
     match std::fs::read_to_string(&path) {
-        Ok(text) => parse(&text, &path),
+        Ok(text) => {
+            let mut config = parse(&text, &path)?;
+            config.library_path = config
+                .library_path
+                .map(|lib| resolve_library_path(&path, lib));
+            Ok(config)
+        }
         Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(source) => Err(ConfigError::Read { path, source }),
     }
 }
 
-/// Parse config text (used by `load`; separate for unit tests).
+/// Resolve a relative `library_path` against the config file's directory.
+fn resolve_library_path(config_path: &Path, library_path: PathBuf) -> PathBuf {
+    if library_path.is_absolute() {
+        return library_path;
+    }
+    let config_path = std::path::absolute(config_path).unwrap_or_else(|_| config_path.into());
+    match config_path.parent() {
+        Some(dir) => dir.join(library_path),
+        None => library_path,
+    }
+}
+
+/// Parse config text (used by `load`; separate for unit tests). Paths are returned
+/// as written; `load` resolves a relative `library_path`.
 pub fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
     toml::from_str(text).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
@@ -181,6 +204,23 @@ mod tests {
             parse("fail_on = \"sometimes\"", Path::new("c.toml")),
             Err(ConfigError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn relative_library_path_is_resolved_against_config_dir() {
+        assert_eq!(
+            resolve_library_path(Path::new("/etc/liner/c.toml"), "music".into()),
+            PathBuf::from("/etc/liner/music")
+        );
+        assert_eq!(
+            resolve_library_path(Path::new("/etc/liner/c.toml"), "/m".into()),
+            PathBuf::from("/m")
+        );
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_library_path(Path::new("c.toml"), "music".into()),
+            cwd.join("music")
+        );
     }
 
     #[test]

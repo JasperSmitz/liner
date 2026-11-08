@@ -47,27 +47,37 @@
         "path",
         "disc_count",
         "track_count",
-        "discs"
+        "discs",
+        "album_artist",
+        "title"
       ],
       "type": "object"
     },
     "AudioFormat": {
-      "description": "Audio container/codec as detected by the tag reader (content-based, not by extension).",
-      "enum": [
-        "flac",
-        "mp3",
-        "ogg-vorbis",
-        "opus",
-        "speex",
-        "mp4",
-        "aac",
-        "wav",
-        "aiff",
-        "ape",
-        "wav-pack",
-        "musepack"
+      "anyOf": [
+        {
+          "enum": [
+            "flac",
+            "mp3",
+            "ogg-vorbis",
+            "opus",
+            "speex",
+            "mp4",
+            "aac",
+            "wav",
+            "aiff",
+            "ape",
+            "wav-pack",
+            "musepack"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A value added in a later 1.x minor version.",
+          "type": "string"
+        }
       ],
-      "type": "string"
+      "description": "Audio container/codec as detected by the tag reader (content-based, not by extension). Open set: consumers must tolerate values not listed here."
     },
     "DiscEntry": {
       "properties": {
@@ -95,7 +105,9 @@
         }
       },
       "required": [
-        "tracks"
+        "tracks",
+        "folder",
+        "number"
       ],
       "type": "object"
     },
@@ -122,35 +134,42 @@
       "type": "object"
     },
     "FileErrorKind": {
-      "description": "Why a file could not be scanned or read.",
-      "oneOf": [
+      "anyOf": [
         {
-          "const": "walk",
-          "description": "Directory walk failed for this entry (permission denied, symlink loop, ...).",
-          "type": "string"
+          "oneOf": [
+            {
+              "const": "walk",
+              "description": "Directory walk failed for this entry (permission denied, symlink loop, ...).",
+              "type": "string"
+            },
+            {
+              "const": "io",
+              "description": "I/O error while opening/reading the file.",
+              "type": "string"
+            },
+            {
+              "const": "unsupported",
+              "description": "Format not recognised or not supported by the tag reader.",
+              "type": "string"
+            },
+            {
+              "const": "corrupt",
+              "description": "Recognised format but the file is malformed, truncated or empty.",
+              "type": "string"
+            }
+          ]
         },
         {
-          "const": "io",
-          "description": "I/O error while opening/reading the file.",
-          "type": "string"
-        },
-        {
-          "const": "unsupported",
-          "description": "Format not recognised or not supported by the tag reader.",
-          "type": "string"
-        },
-        {
-          "const": "corrupt",
-          "description": "Recognised format but the file is malformed, truncated or empty.",
+          "description": "A value added in a later 1.x minor version.",
           "type": "string"
         }
-      ]
+      ],
+      "description": "Why a file could not be scanned or read. Open set: consumers must tolerate values not listed here."
     },
     "Issue": {
       "description": "One finding produced by a lint rule. Serialised verbatim into `issues[]`.",
       "properties": {
         "album_id": {
-          "default": null,
           "description": "Album id (root-relative directory) for file/album issues; null for library scope.",
           "type": [
             "string",
@@ -163,7 +182,6 @@
         },
         "details": {
           "additionalProperties": true,
-          "default": {},
           "description": "Rule-specific structured data; keys per rule are documented in `docs/RULES.md`.",
           "type": "object"
         },
@@ -190,7 +208,32 @@
         "severity",
         "scope",
         "message",
-        "paths"
+        "paths",
+        "details",
+        "album_id"
+      ],
+      "type": "object"
+    },
+    "ReportOptions": {
+      "description": "Scan and filter options in effect, so consumers can tell a filtered report from\na clean library.",
+      "properties": {
+        "follow_symlinks": {
+          "description": "Symbolic links were followed while walking.",
+          "type": "boolean"
+        },
+        "include_hidden": {
+          "description": "Hidden files and directories (names starting with '.') were scanned.",
+          "type": "boolean"
+        },
+        "min_severity": {
+          "$ref": "#/$defs/Severity",
+          "description": "Issues below this severity were removed from `issues` (`--min-severity`);\ntheir number is `summary.issues_hidden`."
+        }
+      },
+      "required": [
+        "min_severity",
+        "follow_symlinks",
+        "include_hidden"
       ],
       "type": "object"
     },
@@ -270,6 +313,12 @@
           "$ref": "#/$defs/SeverityCounts",
           "description": "Counts of the issues in this report (after `--min-severity` filtering)."
         },
+        "issues_hidden": {
+          "description": "Issues removed by `--min-severity` (`options.min_severity`); not included\nin `issues_by_severity` or `issues_by_code`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "unreadable_files": {
           "description": "Number of entries in `errors`.",
           "format": "uint64",
@@ -283,22 +332,31 @@
         "unreadable_files",
         "albums",
         "issues_by_severity",
-        "issues_by_code"
+        "issues_by_code",
+        "issues_hidden"
       ],
       "type": "object"
     },
     "TagKind": {
-      "description": "Kind of tag block present in a file. Mirrors lofty's `TagType` without leaking it.",
-      "enum": [
-        "id3v1",
-        "id3v2",
-        "ape",
-        "vorbis-comments",
-        "mp4-ilst",
-        "riff-info",
-        "aiff-text"
+      "anyOf": [
+        {
+          "enum": [
+            "id3v1",
+            "id3v2",
+            "ape",
+            "vorbis-comments",
+            "mp4-ilst",
+            "riff-info",
+            "aiff-text"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A value added in a later 1.x minor version.",
+          "type": "string"
+        }
       ],
-      "type": "string"
+      "description": "Kind of tag block present in a file. Mirrors lofty's `TagType` without leaking it. Open set: consumers must tolerate values not listed here."
     },
     "ToolInfo": {
       "properties": {
@@ -419,13 +477,24 @@
         "path",
         "format",
         "compilation",
-        "tag_types"
+        "tag_types",
+        "album",
+        "album_artist",
+        "artist",
+        "disc_no",
+        "disc_total",
+        "duration_ms",
+        "genre",
+        "title",
+        "track_no",
+        "track_total",
+        "year"
       ],
       "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Metadata lint report produced by `liner scan --format json`. Consumers must ignore unknown fields and tolerate unknown enum values in `code`.",
+  "description": "Metadata lint report produced by `liner scan --format json`. Every key is always present; optional values are null. Consumers must check the major `schema_version`, ignore unknown fields, and tolerate unknown issue `code`s and unknown `format`, `tag_types` and error `kind` values. The keys of `issues[].details` for each code are documented (and contractual) in docs/RULES.md.",
   "properties": {
     "albums": {
       "items": {
@@ -441,6 +510,7 @@
     },
     "generated_at": {
       "description": "RFC 3339 UTC timestamp, e.g. \"2026-11-08T10:00:00Z\".",
+      "format": "date-time",
       "type": "string"
     },
     "issues": {
@@ -448,6 +518,10 @@
         "$ref": "#/$defs/Issue"
       },
       "type": "array"
+    },
+    "options": {
+      "$ref": "#/$defs/ReportOptions",
+      "description": "Scan and filter options that shaped this report."
     },
     "root": {
       "description": "Absolute path of the scanned library root (lossy UTF-8).",
@@ -469,6 +543,7 @@
     "tool",
     "generated_at",
     "root",
+    "options",
     "summary",
     "albums",
     "issues",

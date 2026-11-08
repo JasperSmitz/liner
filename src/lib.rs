@@ -42,6 +42,7 @@ pub fn analyze(
     Ok(report::build_report(ReportInput {
         root: &root,
         generated_at,
+        scan_options: *options,
         scan: &scan,
         read_errors: &metadata.errors,
         albums: &albums,

@@ -10,7 +10,8 @@
 //!   (`--color`, TTY, `NO_COLOR`) is made by the caller via [`use_color`], so
 //!   rendering itself does no terminal detection.
 //! - [`create_output_file`] is the ONLY place in the crate allowed to create a file
-//!   (clippy `disallowed-methods` enforces this).
+//!   (clippy `disallowed-methods` enforces this). [`check_output_path`] validates an
+//!   `--output` path up front without touching the disk.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -192,11 +193,26 @@ pub fn render_human_with(
 
     section_break(out)?;
     let s = &report.summary;
+    let min = report.options.min_severity.as_str();
     if report.issues.is_empty() && report.errors.is_empty() {
-        writeln!(out, "No issues found.")?;
+        match s.issues_hidden {
+            0 => writeln!(out, "No issues found.")?,
+            1 => writeln!(
+                out,
+                "No issues at or above {min} (1 lower-severity issue hidden)."
+            )?,
+            n => writeln!(
+                out,
+                "No issues at or above {min} ({n} lower-severity issues hidden)."
+            )?,
+        }
     }
+    let hidden = match s.issues_hidden {
+        0 => String::new(),
+        n => format!(" ({n} below {min} hidden)"),
+    };
     let summary = format!(
-        "{} files scanned, {} audio, {} unreadable, {} albums; {} errors, {} warnings, {} info",
+        "{} files scanned, {} audio, {} unreadable, {} albums; {} errors, {} warnings, {} info{hidden}",
         s.files_scanned,
         s.audio_files,
         s.unreadable_files,
@@ -289,35 +305,119 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Create (truncate) the `--output` report file.
+/// Cheap checks of an `--output` path, done before the (slow) scan so a mistake is
+/// reported at once. Touches nothing on disk. Refuses, with
+/// [`LinerError::UnsafeOutput`]:
+/// - a name with an audio extension (`scan::is_audio_extension`, any case);
+/// - an existing path that is not a regular file (directory, symlink, FIFO, ...);
+/// - a path whose (canonicalised) directory lies inside the (canonicalised) library
+///   root, since liner never creates or changes files in the library.
 ///
-/// Refuses, with [`LinerError::UnsafeOutput`], any path whose extension is an audio
-/// extension (`scan::is_audio_extension`) or that exists and is not a regular file,
-/// so a mistyped `--output` can never clobber music.
-pub fn create_output_file(path: &Path) -> Result<std::fs::File> {
-    let unsafe_output = |reason: &str| LinerError::UnsafeOutput {
-        path: path.to_path_buf(),
-        reason: reason.to_owned(),
-    };
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(crate::scan::is_audio_extension)
-    {
-        return Err(unsafe_output("output file has an audio file extension"));
+/// A missing parent directory is an [`LinerError::Io`] error. If `library_root`
+/// cannot be canonicalised the library check is skipped; the scan then fails on
+/// the root anyway.
+pub fn check_output_path(path: &Path, library_root: &Path) -> Result<()> {
+    if has_audio_extension(path) {
+        return Err(unsafe_output(
+            path,
+            "output file has an audio file extension",
+        ));
     }
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && !meta.file_type().is_file()
     {
         return Err(unsafe_output(
+            path,
             "output path exists and is not a regular file",
         ));
     }
-    #[allow(clippy::disallowed_methods)] // the single sanctioned write: the report file
-    std::fs::File::create(path).map_err(|source| LinerError::Io {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let parent = std::fs::canonicalize(parent).map_err(|source| LinerError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    if !parent.is_dir() {
+        return Err(unsafe_output(path, "output directory is not a directory"));
+    }
+    if let Ok(root) = std::fs::canonicalize(library_root)
+        && parent.starts_with(&root)
+    {
+        return Err(unsafe_output(
+            path,
+            "output file would be inside the library being scanned (liner never writes there)",
+        ));
+    }
+    Ok(())
+}
+
+/// Open the `--output` report file for writing, emptied. Call it only once the
+/// report has been fully rendered, so a failed run leaves an existing file alone.
+///
+/// Race-free against path swaps: the path is opened without following symlinks
+/// and without truncating, the *opened handle* is checked (regular file, no other
+/// hard links: truncating a hard link to an audio file would destroy it), and only
+/// then is the file emptied. Audio extensions are refused as in
+/// [`check_output_path`].
+pub fn create_output_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    if has_audio_extension(path) {
+        return Err(unsafe_output(
+            path,
+            "output file has an audio file extension",
+        ));
+    }
+    let io_err = |source| LinerError::Io {
         path: path.to_path_buf(),
         source,
-    })
+    };
+    // The single sanctioned write in the crate: the user-requested report file.
+    // O_NONBLOCK: never hang opening a FIFO. O_NOFOLLOW: never write through a symlink.
+    #[allow(clippy::disallowed_methods)]
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .mode(0o644)
+        .open(path);
+    let file = match file {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(unsafe_output(path, "output path is a symbolic link"));
+        }
+        Err(e) => return Err(io_err(e)),
+    };
+    let meta = file.metadata().map_err(io_err)?;
+    if !meta.file_type().is_file() {
+        return Err(unsafe_output(
+            path,
+            "output path exists and is not a regular file",
+        ));
+    }
+    if meta.nlink() > 1 {
+        return Err(unsafe_output(
+            path,
+            "output file has other hard links (it could be an audio file)",
+        ));
+    }
+    file.set_len(0).map_err(io_err)?;
+    Ok(file)
+}
+
+fn has_audio_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(crate::scan::is_audio_extension)
+}
+
+fn unsafe_output(path: &Path, reason: &str) -> LinerError {
+    LinerError::UnsafeOutput {
+        path: path.to_path_buf(),
+        reason: reason.to_owned(),
+    }
 }
 
 #[cfg(test)]

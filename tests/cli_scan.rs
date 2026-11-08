@@ -1,6 +1,7 @@
-//! `liner scan` through the binary: config resolution, exit code 2 paths, output
-//! file safety, colour and broken pipes. Exit codes 0/1 for issue thresholds are
-//! unit-tested on the pure `cli::outcome` (src/cli.rs), since they need no files.
+//! `liner scan` through the binary: config resolution, exit codes, output file
+//! safety, colour and broken pipes. The full exit-code matrix for issue thresholds
+//! is unit-tested on the pure `cli::outcome` (src/cli.rs); here the wiring is
+//! checked end to end with unreadable (corrupt) files.
 
 mod common;
 
@@ -242,7 +243,15 @@ fn closed_stdout_exits_quietly() {
     // Smoke test of `liner rules | head -0`; the EPIPE path itself is unit-tested
     // with a failing writer in src/cli.rs (the race here may let the write succeed).
     let bin = assert_cmd::cargo::cargo_bin("liner");
-    for args in [&["rules"][..], &["schema"][..]] {
+    let lib = common::Library::new();
+    lib.add("A/B/01.flac", common::Fixture::Flac, &common::Tags::new());
+    let root = lib.root().to_str().unwrap();
+    for args in [
+        &["rules"][..],
+        &["schema"][..],
+        &["scan", root][..],
+        &["scan", root, "--format", "json"][..],
+    ] {
         let mut child = std::process::Command::new(&bin)
             .args(args)
             .env("XDG_CONFIG_HOME", "/nonexistent-liner-test-config")
@@ -289,4 +298,235 @@ fn error_display_never_repeats_its_source() {
             source = s.source();
         }
     }
+}
+
+/// Bytes and inode metadata of a file, to prove liner left it alone.
+fn snapshot(path: &Path) -> (Vec<u8>, std::time::SystemTime) {
+    let meta = std::fs::metadata(path).unwrap();
+    (std::fs::read(path).unwrap(), meta.modified().unwrap())
+}
+
+fn library_with_track() -> (common::Library, std::path::PathBuf) {
+    let lib = common::Library::new();
+    let track = lib.add(
+        "A/B/01.flac",
+        common::Fixture::Flac,
+        &common::Tags::album_track("B", "A", 1),
+    );
+    (lib, track)
+}
+
+#[test]
+fn output_hard_link_to_audio_is_refused() {
+    let (lib, track) = library_with_track();
+    let before = snapshot(&track);
+    let out = tempfile::tempdir().unwrap();
+    let report = out.path().join("report.json");
+    std::fs::hard_link(&track, &report).unwrap();
+    liner()
+        .args(["scan", "--format", "json"])
+        .arg(lib.root())
+        .arg("--output")
+        .arg(&report)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("hard links"));
+    assert_eq!(snapshot(&track), before);
+}
+
+#[test]
+fn output_symlink_to_audio_is_refused() {
+    let (lib, track) = library_with_track();
+    let before = snapshot(&track);
+    let out = tempfile::tempdir().unwrap();
+    let report = out.path().join("report.json");
+    std::os::unix::fs::symlink(&track, &report).unwrap();
+    liner()
+        .args(["scan", "--format", "json"])
+        .arg(lib.root())
+        .arg("--output")
+        .arg(&report)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("not a regular file"));
+    assert_eq!(snapshot(&track), before);
+}
+
+#[test]
+fn fatal_error_leaves_existing_output_untouched() {
+    let out = tempfile::tempdir().unwrap();
+    let keep = out.path().join("keep.json");
+    write(&keep, "precious\n");
+    liner()
+        .args(["scan", "/nonexistent-liner-test-library", "--output"])
+        .arg(&keep)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("does not exist"));
+    assert_eq!(std::fs::read_to_string(&keep).unwrap(), "precious\n");
+}
+
+#[test]
+fn output_inside_library_is_refused() {
+    let (lib, _) = library_with_track();
+    for rel in ["r.json", "A/B/album.cue", "A/new.txt"] {
+        let target = lib.path(rel);
+        liner()
+            .arg("scan")
+            .arg(lib.root())
+            .arg("--output")
+            .arg(&target)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("inside the library"));
+        assert!(!target.exists(), "{rel}");
+    }
+    // Also through a relative library path and a symlinked output directory.
+    let out = tempfile::tempdir().unwrap();
+    let link = out.path().join("lib-link");
+    std::os::unix::fs::symlink(lib.path("A"), &link).unwrap();
+    liner()
+        .current_dir(lib.root())
+        .args(["scan", ".", "--output"])
+        .arg(link.join("x.json"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("inside the library"));
+    assert!(!lib.path("A/x.json").exists());
+}
+
+#[test]
+fn output_with_audio_extension_is_refused_in_any_case() {
+    let lib = common::Library::new();
+    let out = tempfile::tempdir().unwrap();
+    for name in ["report.flac", "REPORT.FLAC", "r.Mp3"] {
+        let target = out.path().join(name);
+        liner()
+            .arg("scan")
+            .arg(lib.root())
+            .arg("--output")
+            .arg(&target)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("audio file extension"));
+        assert!(!target.exists(), "{name}");
+    }
+}
+
+#[test]
+fn output_in_missing_directory_exits_2() {
+    let lib = common::Library::new();
+    liner()
+        .arg("scan")
+        .arg(lib.root())
+        .args(["--output", "/nonexistent-liner-test-dir/r.json"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn existing_output_file_is_replaced() {
+    let lib = common::Library::new();
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("report.txt");
+    write(&file, &"x".repeat(100_000));
+    liner()
+        .arg("scan")
+        .arg(lib.root())
+        .arg("--output")
+        .arg(&file)
+        .assert()
+        .code(0)
+        .stdout("");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("No issues found.\n"), "{text:.200}");
+    assert!(!text.contains('x'));
+}
+
+fn corrupt_library() -> common::Library {
+    let lib = common::Library::new();
+    lib.add_corrupt("A/B/01.flac", common::Corrupt::Truncated);
+    lib
+}
+
+#[test]
+fn unreadable_file_exits_1_through_the_binary() {
+    let lib = corrupt_library();
+    let out = liner()
+        .args(["scan", "--format", "json"])
+        .arg(lib.root())
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["summary"]["unreadable_files"], 1);
+    assert_eq!(v["errors"][0]["path"], "A/B/01.flac");
+    assert_eq!(v["errors"][0]["kind"], "corrupt");
+
+    // Human output says why it failed.
+    liner()
+        .arg("scan")
+        .arg(lib.root())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("Unreadable files (1)"));
+}
+
+#[test]
+fn fail_on_never_ignores_unreadable_files() {
+    let lib = corrupt_library();
+    liner()
+        .args(["scan", "--fail-on", "never"])
+        .arg(lib.root())
+        .assert()
+        .code(0);
+}
+
+#[test]
+fn min_severity_does_not_hide_unreadable_files_from_exit_code() {
+    let lib = corrupt_library();
+    let out = liner()
+        .args(["scan", "--format", "json", "--min-severity", "error"])
+        .arg(lib.root())
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["options"]["min_severity"], "error");
+    assert_eq!(v["summary"]["unreadable_files"], 1);
+}
+
+#[test]
+fn report_records_scan_options() {
+    let lib = common::Library::new();
+    let v = json_stdout(
+        liner()
+            .args(["scan", "--format", "json", "--include-hidden"])
+            .arg(lib.root()),
+    );
+    assert_eq!(
+        v["options"],
+        serde_json::json!({"min_severity": "info", "follow_symlinks": false, "include_hidden": true})
+    );
+    assert_eq!(v["summary"]["issues_hidden"], 0);
+}
+
+#[test]
+fn relative_library_path_is_relative_to_config_file() {
+    let cfg_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cfg_dir.path().join("music")).unwrap();
+    let cfg = cfg_dir.path().join("c.toml");
+    write(&cfg, "library_path = \"music\"\n");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let v = json_stdout(
+        liner()
+            .current_dir(elsewhere.path())
+            .args(["scan", "--format", "json", "--config"])
+            .arg(&cfg),
+    );
+    assert_eq!(v["root"], abs(&cfg_dir.path().join("music")));
 }

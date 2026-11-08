@@ -380,6 +380,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "jiff",
+ "libc",
  "lofty",
  "predicates",
  "rayon",
