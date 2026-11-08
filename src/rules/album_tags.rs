@@ -22,7 +22,9 @@ pub(super) fn check(unit: &AlbumUnit, out: &mut Vec<Issue>) {
         mixed_album_directory(unit, field, out);
         inconsistent_tag_spelling(unit, field, out);
     }
-    for part in unit.partitions() {
+    // Files without an album tag are not an album: album-level tag rules would
+    // only produce noise for a folder of loose singles (they get `missing-album`).
+    for part in unit.partitions().into_iter().filter(|p| !p.is_untitled()) {
         partial_album_artist(unit, &part, out);
         missing_album_artist(unit, &part, out);
         inconsistent_year(unit, &part, out);

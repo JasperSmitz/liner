@@ -39,8 +39,9 @@ Common definitions (see ADR 0002):
   or none, stays one album.
 - *untitled partition*: a partition in which no track has an album tag (loose
   singles). It is not an album: none of the rules in the numbering table run for
-  it, so a "Singles" folder whose files are all track 1 of 1 gets no
-  `duplicate-track-position`. File-scope rules still apply. The multi-disc decision, the effective-disc fallback and the
+  it, and neither do `partial-album-artist`, `missing-album-artist` or
+  `inconsistent-year`, so a "Singles" folder whose files are all track 1 of 1
+  gets no `duplicate-track-position` or album-artist noise. File-scope rules still apply. The multi-disc decision, the effective-disc fallback and the
   split-album key are also computed per partition, so one album's disc tags never
   affect another album in the same directory. All album-scope rules in the
   numbering table run per album (except for an untitled partition); `mixed-album-directory` and

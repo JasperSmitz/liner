@@ -1545,6 +1545,9 @@ fn singles_folder_without_album_tags_has_no_position_issues() {
         codes::LIKELY_MISSING_DISC_NUMBERS,
         codes::TRACK_NUMBER_GAP,
         codes::INCONSISTENT_TRACK_TOTAL,
+        codes::MISSING_ALBUM_ARTIST,
+        codes::PARTIAL_ALBUM_ARTIST,
+        codes::INCONSISTENT_YEAR,
     ] {
         assert!(only(&issues, code).is_empty(), "{code}: {issues:#?}");
     }
