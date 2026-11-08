@@ -2,19 +2,19 @@
 //!
 //! `mixed-album-directory` and `inconsistent-tag-spelling` look at the whole unit;
 //! the album-artist and year rules run per album partition (see
-//! [`super::util::album_partitions`]).
+//! [`AlbumUnit::partitions`]).
 
 use std::collections::BTreeSet;
 
 use serde_json::json;
 
-use crate::group::{AlbumUnit, GroupedTrack, most_common};
+use crate::group::{AlbumPartition, AlbumUnit, GroupedTrack, most_common};
 use crate::model::Issue;
 
 use super::codes;
 use super::util::{
-    Partition, album_partitions, count_noun, details, group_normalized, issue, paths, quote,
-    quoted_list, representative_spellings,
+    PartitionMessage, count_noun, details, group_normalized, issue, paths, quote, quoted_list,
+    representative_spellings,
 };
 
 pub(super) fn check(unit: &AlbumUnit, out: &mut Vec<Issue>) {
@@ -22,7 +22,7 @@ pub(super) fn check(unit: &AlbumUnit, out: &mut Vec<Issue>) {
         mixed_album_directory(unit, field, out);
         inconsistent_tag_spelling(unit, field, out);
     }
-    for part in album_partitions(unit) {
+    for part in unit.partitions() {
         partial_album_artist(unit, &part, out);
         missing_album_artist(unit, &part, out);
         inconsistent_year(unit, &part, out);
@@ -114,7 +114,7 @@ fn inconsistent_tag_spelling(unit: &AlbumUnit, field: Field, out: &mut Vec<Issue
     }
 }
 
-fn partial_album_artist(unit: &AlbumUnit, part: &Partition<'_>, out: &mut Vec<Issue>) {
+fn partial_album_artist(unit: &AlbumUnit, part: &AlbumPartition<'_>, out: &mut Vec<Issue>) {
     let (with, without): (Vec<&GroupedTrack>, Vec<&GroupedTrack>) = part
         .tracks
         .iter()
@@ -142,7 +142,7 @@ fn partial_album_artist(unit: &AlbumUnit, part: &Partition<'_>, out: &mut Vec<Is
     ));
 }
 
-fn missing_album_artist(unit: &AlbumUnit, part: &Partition<'_>, out: &mut Vec<Issue>) {
+fn missing_album_artist(unit: &AlbumUnit, part: &AlbumPartition<'_>, out: &mut Vec<Issue>) {
     if part.tracks.iter().any(|t| t.info.album_artist.is_some()) {
         return;
     }
@@ -165,7 +165,7 @@ fn missing_album_artist(unit: &AlbumUnit, part: &Partition<'_>, out: &mut Vec<Is
     ));
 }
 
-fn inconsistent_year(unit: &AlbumUnit, part: &Partition<'_>, out: &mut Vec<Issue>) {
+fn inconsistent_year(unit: &AlbumUnit, part: &AlbumPartition<'_>, out: &mut Vec<Issue>) {
     let with_year: Vec<&GroupedTrack> = part
         .tracks
         .iter()

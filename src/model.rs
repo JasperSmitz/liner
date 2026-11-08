@@ -226,13 +226,27 @@ pub fn rel_path_string(root: &Path, path: &Path) -> String {
 }
 
 /// Normalisation used for *comparing* tag values (never for display):
-/// trims Unicode whitespace, collapses internal whitespace runs to one space,
-/// lowercases (Unicode `to_lowercase`, an approximation of full case folding).
+/// Unicode NFC (so precomposed and decomposed accents compare equal), curly quotes
+/// folded to straight ones (`‘’‚‛` -> `'`, `“”„‟` -> `"`), Unicode whitespace
+/// trimmed and internal runs collapsed to one space, then lowercased (Unicode
+/// `to_lowercase`, an approximation of full case folding).
 pub fn normalize_for_compare(s: &str) -> String {
-    s.split_whitespace()
+    use unicode_normalization::UnicodeNormalization;
+    let folded: String = s
+        .nfc()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            c => c,
+        })
+        .collect();
+    folded
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+        .nfc()
+        .collect()
 }
 
 #[cfg(test)]
@@ -244,6 +258,14 @@ mod tests {
         assert_eq!(normalize_for_compare("  The\u{00A0} Wall\t "), "the wall");
         assert_eq!(normalize_for_compare("ÄBC"), "äbc");
         assert_eq!(normalize_for_compare("   "), "");
+        assert_eq!(
+            normalize_for_compare("Cafe\u{0301}"),
+            normalize_for_compare("Caf\u{00E9}")
+        );
+        assert_eq!(
+            normalize_for_compare("Don\u{2019}t \u{201C}X\u{201D}"),
+            "don't \"x\""
+        );
     }
 
     #[test]

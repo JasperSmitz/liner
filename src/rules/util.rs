@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::group::{AlbumUnit, GroupedTrack, most_common};
+use crate::group::{AlbumPartition, GroupedTrack, most_common};
 use crate::model::{Issue, normalize_for_compare};
 
 use super::{RuleInfo, rule_info};
@@ -49,55 +49,23 @@ pub(super) fn paths<'a>(tracks: impl IntoIterator<Item = &'a GroupedTrack>) -> V
         .collect()
 }
 
-/// A subset of a unit's tracks that album-level rules treat as one album.
+/// Message prefixing for album partitions ([`AlbumPartition`]).
 ///
-/// In a unit whose tracks carry 2+ distinct normalised album titles (a "mixed"
-/// directory, reported by `mixed-album-directory`), track-numbering and album-tag
-/// rules run per album title, so a flat folder of unrelated albums does not also
-/// produce duplicate positions, gaps or artist issues across different albums. In
-/// every other unit there is exactly one partition holding all tracks.
-pub(super) struct Partition<'a> {
-    /// Message prefix naming the album; `None` for the single-partition case.
-    pub label: Option<String>,
-    pub tracks: Vec<&'a GroupedTrack>,
+/// In a mixed unit (2+ distinct normalised album titles, reported by
+/// `mixed-album-directory`) the per-album rules run per partition, and their
+/// messages name the album; in every other unit there is one unlabelled partition.
+pub(super) trait PartitionMessage {
+    /// Prefix `message` with the album label, if any.
+    fn message(&self, message: String) -> String;
 }
 
-impl Partition<'_> {
-    /// Prefix `message` with the album label, if any.
-    pub fn message(&self, message: String) -> String {
+impl PartitionMessage for AlbumPartition<'_> {
+    fn message(&self, message: String) -> String {
         match &self.label {
             Some(label) => format!("{label}: {message}"),
             None => message,
         }
     }
-}
-
-pub(super) fn album_partitions(unit: &AlbumUnit) -> Vec<Partition<'_>> {
-    let mut by_album: BTreeMap<Option<String>, Vec<&GroupedTrack>> = BTreeMap::new();
-    for t in &unit.tracks {
-        let key = t.info.album.as_deref().map(normalize_for_compare);
-        by_album.entry(key).or_default().push(t);
-    }
-    let titled = by_album.keys().filter(|k| k.is_some()).count();
-    if titled <= 1 {
-        return vec![Partition {
-            label: None,
-            tracks: unit.tracks.iter().collect(),
-        }];
-    }
-    by_album
-        .into_values()
-        .map(|tracks| {
-            let label = match most_common(tracks.iter().filter_map(|t| t.info.album.as_deref())) {
-                Some(album) => format!("Album {}", quote(&album)),
-                None => "Tracks without an album tag".to_owned(),
-            };
-            Partition {
-                label: Some(label),
-                tracks,
-            }
-        })
-        .collect()
 }
 
 /// Group text values by normalised form. Values: every original spelling, in input order.

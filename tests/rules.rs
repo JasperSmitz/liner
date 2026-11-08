@@ -35,6 +35,7 @@ fn album(dir: &str, n: u32) -> Vec<TrackInfo> {
 fn disc(folder: &str, disc: u32, total_discs: u32, n: u32) -> Vec<TrackInfo> {
     (1..=n)
         .map(|i| TrackInfo {
+            title: Some(format!("Song {disc}-{i}")),
             disc_no: Some(disc),
             disc_total: Some(total_discs),
             ..clean(&format!("{folder}/{disc}-{i:02}.flac"), i, n)
@@ -155,7 +156,10 @@ fn positives() -> Vec<(&'static str, Vec<TrackInfo>)> {
             codes::LIKELY_MISSING_DISC_NUMBERS,
             concat(vec![album("A", 10), {
                 (1..=10)
-                    .map(|i| clean(&format!("A/b{i:02}.flac"), i, 10))
+                    .map(|i| TrackInfo {
+                        title: Some(format!("Other {i}")),
+                        ..clean(&format!("A/b{i:02}.flac"), i, 10)
+                    })
                     .collect()
             }]),
         ),
@@ -265,6 +269,40 @@ fn negatives() -> Vec<(&'static str, Vec<TrackInfo>)> {
                 "A/2-01.flac",
                 |t| t.disc_no = Some(1),
             ),
+        ),
+        // The same album in two formats in one folder: copies, not merged discs.
+        (
+            codes::LIKELY_MISSING_DISC_NUMBERS,
+            concat(vec![
+                album("A", 4),
+                album("A", 4)
+                    .into_iter()
+                    .map(|t| TrackInfo {
+                        rel_path: t.rel_path.replace(".flac", ".mp3"),
+                        format: AudioFormat::Mp3,
+                        ..t
+                    })
+                    .collect(),
+            ]),
+        ),
+        // A single copy of track 1 without titles (`01 (1).flac`): same file stem.
+        (
+            codes::LIKELY_MISSING_DISC_NUMBERS,
+            concat(vec![album("A", 5), vec![clean("A/01 (1).flac", 1, 5)]])
+                .into_iter()
+                .map(|t| TrackInfo { title: None, ..t })
+                .collect(),
+        ),
+        // Only track 1 repeats with distinct tracks: one repeat is not a disc signature.
+        (
+            codes::LIKELY_MISSING_DISC_NUMBERS,
+            concat(vec![
+                album("A", 5),
+                vec![TrackInfo {
+                    title: Some("Bonus".into()),
+                    ..clean("A/bonus.flac", 1, 5)
+                }],
+            ]),
         ),
         // One duplicated file (track 1 not repeated) is a duplicate, not merged discs.
         (
@@ -818,6 +856,7 @@ fn repeats_with_only_disc_totals_are_likely_missing_disc_numbers() {
         .into_iter()
         .chain(album("A", 2).into_iter().map(|t| TrackInfo {
             rel_path: t.rel_path.replace(".flac", "b.flac"),
+            title: t.title.as_ref().map(|s| format!("{s} (disc 2)")),
             ..t
         }))
         .map(|t| TrackInfo {
@@ -842,12 +881,14 @@ fn likely_missing_disc_numbers_suppresses_duplicates_and_folder_hints_prevent_it
     assert!(only(&issues, codes::DUPLICATE_TRACK_POSITION).is_empty());
     one(&issues, codes::LIKELY_MISSING_DISC_NUMBERS);
 
-    // A single disc folder hint means disc info exists: duplicates instead.
-    let mut hinted = no_disc_tags(concat(vec![disc("A", 1, 2, 3), disc("A/CD1", 2, 2, 3)]));
-    hinted = edit(hinted, "A/CD1/2-01.flac", |t| t.track_no = Some(1));
+    // A disc folder next to loose files means disc info exists and the unit is
+    // multi-disc: the loose files lack a disc number, nothing is merged onto disc 1.
+    let hinted = no_disc_tags(concat(vec![disc("A", 1, 2, 3), disc("A/CD1", 2, 2, 3)]));
     let issues = run(hinted);
     assert!(only(&issues, codes::LIKELY_MISSING_DISC_NUMBERS).is_empty());
-    assert_eq!(only(&issues, codes::DUPLICATE_TRACK_POSITION).len(), 3);
+    assert!(only(&issues, codes::DUPLICATE_TRACK_POSITION).is_empty());
+    let i = one(&issues, codes::MISSING_DISC_NUMBER);
+    assert_eq!(i.details["count"], json!(6));
 }
 
 #[test]
@@ -1111,4 +1152,332 @@ fn disc_number_gap_ignores_absurd_disc_numbers() {
         only(&issues, codes::DISC_NUMBER_GAP).is_empty(),
         "{issues:#?}"
     );
+}
+
+#[test]
+fn copies_of_the_same_tracks_are_duplicates_not_merged_discs() {
+    // FLAC + MP3 of one album in one folder.
+    let tracks = concat(vec![
+        album("A", 3),
+        album("A", 3)
+            .into_iter()
+            .map(|t| TrackInfo {
+                rel_path: t.rel_path.replace(".flac", ".mp3"),
+                format: AudioFormat::Mp3,
+                ..t
+            })
+            .collect(),
+    ]);
+    let issues = run(tracks);
+    assert_codes(&issues, &[codes::DUPLICATE_TRACK_POSITION]);
+    assert_eq!(only(&issues, codes::DUPLICATE_TRACK_POSITION).len(), 3);
+
+    // A single `01 (1).flac` copy, no titles.
+    let tracks: Vec<TrackInfo> = concat(vec![album("A", 5), vec![clean("A/01 (1).flac", 1, 5)]])
+        .into_iter()
+        .map(|t| TrackInfo { title: None, ..t })
+        .collect();
+    let issues = run(tracks);
+    let i = one(&issues, codes::DUPLICATE_TRACK_POSITION);
+    assert_eq!(i.paths, vec!["A/01 (1).flac", "A/01.flac"]);
+    assert!(only(&issues, codes::LIKELY_MISSING_DISC_NUMBERS).is_empty());
+
+    // Without titles, distinct file stems still reveal merged discs.
+    let tracks: Vec<TrackInfo> = no_disc_tags(concat(vec![disc("A", 1, 2, 3), disc("A", 2, 2, 3)]))
+        .into_iter()
+        .map(|t| TrackInfo { title: None, ..t })
+        .collect();
+    let i = one(&run(tracks), codes::LIKELY_MISSING_DISC_NUMBERS);
+    assert_eq!(i.details["duplicated_tracks"], json!([1, 2, 3]));
+}
+
+/// Track in flat folder `D` with album `album`.
+fn flat(rel: &str, album: &str, track_no: u32) -> TrackInfo {
+    TrackInfo {
+        album: Some(album.into()),
+        title: Some(format!("{album} {track_no}")),
+        ..clean(rel, track_no, 3)
+    }
+}
+
+#[test]
+fn one_albums_disc_tag_does_not_affect_another_album_in_the_directory() {
+    // Review finding 2: Alpha has a real duplicate track 2 and no disc tags; one
+    // Beta track is tagged disc 2/2.
+    let tracks = vec![
+        flat("D/a1.flac", "Alpha", 1),
+        flat("D/a2.flac", "Alpha", 2),
+        flat("D/a2b.flac", "Alpha", 2),
+        flat("D/a3.flac", "Alpha", 3),
+        TrackInfo {
+            disc_no: Some(2),
+            disc_total: Some(2),
+            track_total: Some(1),
+            ..flat("D/b1.flac", "Beta", 1)
+        },
+    ];
+    let units = group_tracks(tracks.clone());
+    let d = &units[0];
+    let parts = d.partitions();
+    assert_eq!(parts.len(), 2);
+    assert!(!parts[0].is_multi_disc, "Alpha");
+    assert!(parts[1].is_multi_disc, "Beta");
+    for t in &d.tracks {
+        let expected = if t.info.rel_path == "D/b1.flac" { 2 } else { 1 };
+        assert_eq!(t.effective_disc, Some(expected), "{}", t.info.rel_path);
+    }
+
+    let issues = run(tracks);
+    let dup = one(&issues, codes::DUPLICATE_TRACK_POSITION);
+    assert_eq!(dup.message, "Album 'Alpha': Track 2 appears 2 times");
+    assert_eq!(dup.paths, vec!["D/a2.flac", "D/a2b.flac"]);
+    let gap = one(&issues, codes::DISC_NUMBER_GAP);
+    assert_eq!(
+        gap.message,
+        "Album 'Beta': Missing disc 1 (found disc 2, disc total 2)"
+    );
+    assert_eq!(gap.paths, vec!["D/b1.flac"]);
+    assert!(
+        only(&issues, codes::MISSING_DISC_NUMBER).is_empty(),
+        "{issues:#?}"
+    );
+
+    // Beta's disc info does not suppress merged-disc detection for Alpha.
+    let tracks = vec![
+        flat("D/a1.flac", "Alpha", 1),
+        flat("D/a2.flac", "Alpha", 2),
+        TrackInfo {
+            title: Some("Alpha 1 again".into()),
+            ..flat("D/a1b.flac", "Alpha", 1)
+        },
+        TrackInfo {
+            title: Some("Alpha 2 again".into()),
+            ..flat("D/a2b.flac", "Alpha", 2)
+        },
+        TrackInfo {
+            disc_no: Some(1),
+            ..flat("D/b1.flac", "Beta", 1)
+        },
+    ];
+    let i = one(&run(tracks), codes::LIKELY_MISSING_DISC_NUMBERS);
+    assert!(i.message.starts_with("Album 'Alpha': "), "{}", i.message);
+}
+
+/// Track tagged `album` / `album_artist` in `dir`.
+fn tagged(dir: &str, n: u32, album: &str, album_artist: &str) -> TrackInfo {
+    TrackInfo {
+        album: Some(album.into()),
+        album_artist: Some(album_artist.into()),
+        artist: Some(album_artist.into()),
+        ..clean(&format!("{dir}/{album}-{n:02}.flac"), n, 3)
+    }
+}
+
+#[test]
+fn split_album_keys_come_from_each_partitions_own_consensus() {
+    // Codex finding: Mixed holds A/X x3, B/Y x2, C/Y x2. Unit-wide majorities are
+    // title A and album artist Y, but no track is A by Y.
+    let mut tracks: Vec<TrackInfo> = (1..=3).map(|n| tagged("Mixed", n, "A", "X")).collect();
+    tracks.extend((1..=2).map(|n| tagged("Mixed", n, "B", "Y")));
+    tracks.extend((1..=2).map(|n| tagged("Mixed", n, "C", "Y")));
+    tracks.extend((1..=3).map(|n| tagged("Clean", n, "A", "Y")));
+    let issues = run(tracks.clone());
+    assert!(only(&issues, codes::SPLIT_ALBUM).is_empty(), "{issues:#?}");
+
+    // A per-partition match is found and lists only that partition's files.
+    tracks.extend((1..=2).map(|n| tagged("Other", n, "B", "Y")));
+    let i = one(&run(tracks), codes::SPLIT_ALBUM);
+    assert_eq!(i.details["album"], json!("B"));
+    assert_eq!(i.details["album_artist"], json!("Y"));
+    assert_eq!(i.details["album_ids"], json!(["Mixed", "Other"]));
+    assert_eq!(
+        i.paths,
+        vec![
+            "Mixed/B-01.flac",
+            "Mixed/B-02.flac",
+            "Other/B-01.flac",
+            "Other/B-02.flac"
+        ]
+    );
+}
+
+#[test]
+fn split_album_needs_an_unambiguous_artist_in_the_partition() {
+    // Two album artists and two track artists in one partition: no key.
+    let ambiguous = vec![tagged("P", 1, "Album", "X"), tagged("P", 2, "Album", "Y")];
+    let clean_y: Vec<TrackInfo> = (1..=2).map(|n| tagged("Q", n, "Album", "Y")).collect();
+    let issues = run(concat(vec![ambiguous, clean_y.clone()]));
+    assert!(only(&issues, codes::SPLIT_ALBUM).is_empty(), "{issues:#?}");
+
+    // Two album artists but one shared track artist: the track artist is the key.
+    let shared = vec![
+        TrackInfo {
+            artist: Some("Y".into()),
+            ..tagged("P", 1, "Album", "X")
+        },
+        tagged("P", 2, "Album", "Y"),
+    ];
+    let i = one(&run(concat(vec![shared, clean_y])), codes::SPLIT_ALBUM);
+    assert_eq!(i.details["album_ids"], json!(["P", "Q"]));
+}
+
+#[test]
+fn split_album_skips_various_artists_compilations() {
+    for va in ["Various Artists", "various", "VA"] {
+        let tracks: Vec<TrackInfo> = ["A", "B"]
+            .into_iter()
+            .flat_map(|dir| (1..=2).map(move |n| tagged(dir, n, "Greatest Hits", va)))
+            .collect();
+        let issues = run(tracks);
+        assert!(
+            only(&issues, codes::SPLIT_ALBUM).is_empty(),
+            "{va}: {issues:#?}"
+        );
+    }
+    // All tracks flagged as compilations, whatever the album artist.
+    let tracks: Vec<TrackInfo> = ["A", "B"]
+        .into_iter()
+        .flat_map(|dir| (1..=2).map(move |n| tagged(dir, n, "Hits", "DJ Mix")))
+        .map(|t| TrackInfo {
+            compilation: true,
+            ..t
+        })
+        .collect();
+    assert!(only(&run(tracks.clone()), codes::SPLIT_ALBUM).is_empty());
+    // One non-compilation track per partition: the key is used again.
+    let tracks = edit(tracks, "A/Hits-01.flac", |t| t.compilation = false);
+    let tracks = edit(tracks, "B/Hits-01.flac", |t| t.compilation = false);
+    one(&run(tracks), codes::SPLIT_ALBUM);
+}
+
+#[test]
+fn unicode_form_and_quote_differences_are_spelling_not_mixed() {
+    for (a, b) in [
+        ("Caf\u{00E9}", "Cafe\u{0301}"),
+        ("Don\u{2019}t Stop", "Don't Stop"),
+        ("\u{201C}Heroes\u{201D}", "\"Heroes\""),
+    ] {
+        let tracks = edit(
+            album("A", 2)
+                .into_iter()
+                .map(|t| TrackInfo {
+                    album: Some(a.into()),
+                    ..t
+                })
+                .collect(),
+            "A/02.flac",
+            |t| t.album = Some(b.into()),
+        );
+        let issues = run(tracks);
+        assert_codes(&issues, &[codes::INCONSISTENT_TAG_SPELLING]);
+    }
+    // Split-album also matches across forms.
+    let tracks = concat(vec![album("A", 2), album("B", 2)])
+        .into_iter()
+        .map(|t| TrackInfo {
+            album_artist: Some(if t.rel_path.starts_with("A/") {
+                "Bjo\u{0308}rk".into()
+            } else {
+                "Bj\u{00F6}rk".into()
+            }),
+            ..t
+        })
+        .collect();
+    one(&run(tracks), codes::SPLIT_ALBUM);
+}
+
+/// Track `i` on disc `d` of 2, continuous numbering, album-wide total `total`.
+fn continuous(d: u32, i: u32, total: u32) -> TrackInfo {
+    TrackInfo {
+        disc_no: Some(d),
+        disc_total: Some(2),
+        title: Some(format!("Song {i}")),
+        ..clean(&format!("A/{d}-{i:02}.flac"), i, total)
+    }
+}
+
+#[test]
+fn continuous_numbering_reports_a_missing_boundary_track_once() {
+    // Last track of disc 1 (12) missing: disc 1 has 1-11, disc 2 has 13-20.
+    for total in [None, Some(20)] {
+        let tracks: Vec<TrackInfo> = (1..=11)
+            .map(|i| continuous(1, i, 20))
+            .chain((13..=20).map(|i| continuous(2, i, 20)))
+            .map(|t| TrackInfo {
+                track_total: total,
+                ..t
+            })
+            .collect();
+        let issues = run(tracks);
+        let i = one(&issues, codes::TRACK_NUMBER_GAP);
+        assert_eq!(i.details["disc"], json!(2), "{total:?}");
+        assert_eq!(i.details["missing"], json!([12]), "{total:?}");
+        assert!(
+            i.message.contains("numbering continues from disc 1"),
+            "{}",
+            i.message
+        );
+    }
+
+    // First track of disc 2 (13) missing: disc 1 has 1-12, disc 2 has 14-20.
+    let tracks: Vec<TrackInfo> = (1..=12)
+        .map(|i| continuous(1, i, 20))
+        .chain((14..=20).map(|i| continuous(2, i, 20)))
+        .collect();
+    let i = one(&run(tracks), codes::TRACK_NUMBER_GAP);
+    assert_eq!(i.details["disc"], json!(2));
+    assert_eq!(i.details["missing"], json!([13]));
+    assert_eq!(
+        i.message,
+        "Disc 2 is missing track 13 (track total 20, numbering continues from disc 1)"
+    );
+}
+
+#[test]
+fn single_disc_folder_with_number_above_one_is_multi_disc() {
+    // Loose 01-03 plus A/CD2/01-02, no disc tags: same meaning as tagging disc 2.
+    let tracks = concat(vec![
+        album("A", 3),
+        (1..=2)
+            .map(|i| TrackInfo {
+                title: Some(format!("Disc 2 song {i}")),
+                ..clean(&format!("A/CD2/{i:02}.flac"), i, 2)
+            })
+            .collect(),
+    ]);
+    let units = group_tracks(tracks.clone());
+    assert!(units[0].is_multi_disc);
+    let issues = run(tracks);
+    let i = one(&issues, codes::MISSING_DISC_NUMBER);
+    assert_eq!(i.details["count"], json!(5));
+    one(&issues, codes::DISC_NUMBER_GAP);
+}
+
+#[test]
+fn u32_max_numbers_do_not_panic() {
+    let max = u32::MAX;
+    let tracks: Vec<TrackInfo> = [(1, "A/1.flac"), (max, "A/2.flac"), (max - 1, "A/3.flac")]
+        .into_iter()
+        .flat_map(|(disc, rel)| {
+            [
+                TrackInfo {
+                    track_no: Some(max),
+                    track_total: Some(max),
+                    disc_no: Some(disc),
+                    disc_total: Some(max),
+                    ..clean(rel, 1, 1)
+                },
+                TrackInfo {
+                    track_no: Some(max - 1),
+                    track_total: Some(max),
+                    disc_no: Some(disc),
+                    disc_total: Some(max),
+                    ..clean(&rel.replace(".flac", "b.flac"), 1, 1)
+                },
+            ]
+        })
+        .collect();
+    run(tracks.clone());
+    // And with no disc numbers at all.
+    run(no_disc_tags(tracks));
 }
