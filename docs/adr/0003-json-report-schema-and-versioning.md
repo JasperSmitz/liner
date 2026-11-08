@@ -31,6 +31,11 @@ need a stable, documented, versioned format.
 - **Determinism**: all arrays sorted (see `report.rs` docs), maps are
   `BTreeMap`, pretty-printed with a trailing newline. Same input + same
   `generated_at` ⇒ identical bytes, so reports are diffable.
+- `errors[]` lists files that could not be walked or read. They carry no issue
+  code or severity in the JSON, but they are a library-health signal: the CLI
+  treats them as error severity for `--fail-on` (exit 1 unless `--fail-on never`).
+  Consumers should likewise not treat a report with a non-empty `errors[]` as
+  clean.
 - Severity of each code is fixed per schema major; changing it is a minor change
   (consumers must not hard-code severities), documented in the changelog.
 

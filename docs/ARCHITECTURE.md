@@ -60,7 +60,7 @@ PATH ─► scan::scan ──► ScanResult { audio_files, other_files, errors }
             │
             ▼
       report::build_report ──► Report (sorted, summary computed)
-            │      cli: --fail-on evaluated on all issues, then --min-severity filter
+            │      cli: --fail-on evaluated on all issues + errors[], then --min-severity filter
             ▼
       render::render ──► stdout or --output FILE (human | json)
 ```
@@ -87,6 +87,7 @@ Key contracts (details in module docs):
 liner scan [PATH] [--format human|json] [--output FILE]
            [--fail-on error|warning|info|never] [--min-severity info|warning|error]
            [--follow-symlinks] [--include-hidden] [--config FILE]
+           [--color auto|always|never]
 liner rules     # list rule codes, severity, scope, summary
 liner schema    # print the report JSON Schema
 ```
@@ -99,9 +100,20 @@ liner schema    # print the report JSON Schema
 - `--fail-on` (default `error`) is evaluated on **all** issues, before
   `--min-severity` (default `info`) filters the issues in the output. The report's
   `summary` describes the issues that are in the report.
-- Exit codes: `0` no issue at/above `--fail-on`; `1` such issues found; `2`
-  runtime or usage error (clap's own usage errors also exit 2). Unreadable files are
-  reported in `errors[]` and do not by themselves change the exit code.
+- Exit codes: `0` no issue at/above `--fail-on` and no unreadable file; `1` such
+  issues found, or `errors[]` is non-empty; `2` runtime or usage error (clap's own
+  usage errors also exit 2). Entries in `errors[]` (walk/io/unsupported/corrupt)
+  are a library-health problem and count as **error** severity for `--fail-on`, so
+  only `--fail-on never` ignores them (lead decision, M3). The logic is the pure
+  `cli::outcome` function.
+- Human output is grouped per album (only albums with issues: header with id,
+  title, album artist, disc/track counts; issues indented with a severity marker),
+  then library issues, then unreadable files, then a summary line. ANSI colour is
+  used only with `--color always`, or with `--color auto` (default) when stdout is a
+  terminal and `NO_COLOR` is unset or empty. JSON is never coloured; an
+  `--output` file only with `--color always`.
+- A closed stdout (`liner scan | head`) ends output quietly; the exit code is still
+  computed from the report.
 
 ## Error handling
 

@@ -79,5 +79,8 @@ disc folders not named `CD/Disc/Disk N`.
 
 ## Not issues
 
-Unreadable, unsupported and corrupt files appear in `errors[]`, not `issues[]`, and
-do not affect the exit code.
+Unreadable, unsupported and corrupt files (and walk failures) appear in `errors[]`,
+not `issues[]`, and have no rule code. They are a library-health problem, though:
+for the exit code they count as **error** severity, so any entry in `errors[]`
+makes `liner scan` exit 1 unless `--fail-on never`. `--min-severity` never hides
+them.

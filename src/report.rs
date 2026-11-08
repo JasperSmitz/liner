@@ -9,14 +9,15 @@
 //! errors by path); maps are `BTreeMap`. Given the same library and the same
 //! `generated_at`, the JSON output is byte-identical.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::group::AlbumUnit;
-use crate::model::{AudioFormat, FileError, FileErrorKind, Issue, Severity, TagKind};
+use crate::group::{AlbumUnit, GroupedTrack};
+use crate::model::{AudioFormat, FileError, FileErrorKind, Issue, Severity, TagKind, TrackInfo};
 use crate::scan::ScanResult;
 
 /// Version of the JSON report schema (semver, independent of the crate version).
@@ -145,9 +146,29 @@ pub struct ReportInput<'a> {
 }
 
 /// Assemble the report: convert, sort, compute the summary.
+///
+/// Pure: the output depends only on the input values, not on their order.
 pub fn build_report(input: ReportInput<'_>) -> Report {
-    // M3 placeholder: conversion of albums/errors and sorting to be implemented by
-    // developer C. Header fields are final.
+    let mut albums: Vec<AlbumEntry> = input.albums.iter().map(album_entry).collect();
+    albums.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut issues = input.issues.to_vec();
+    issues.sort_by(compare_issues);
+
+    let mut errors: Vec<FileErrorEntry> = input
+        .scan
+        .errors
+        .iter()
+        .chain(input.read_errors)
+        .map(|e| FileErrorEntry {
+            path: e.rel_path.clone(),
+            kind: e.kind,
+            message: e.message.clone(),
+        })
+        .collect();
+    errors.sort_by(|a, b| (&a.path, a.kind, &a.message).cmp(&(&b.path, b.kind, &b.message)));
+    errors.dedup();
+
     let mut report = Report {
         schema_version: SCHEMA_VERSION.to_owned(),
         tool: ToolInfo {
@@ -164,12 +185,89 @@ pub fn build_report(input: ReportInput<'_>) -> Report {
             issues_by_severity: SeverityCounts::default(),
             issues_by_code: BTreeMap::new(),
         },
-        albums: Vec::new(),
-        issues: Vec::new(),
-        errors: Vec::new(),
+        albums,
+        issues,
+        errors,
     };
     report.recompute_summary();
     report
+}
+
+/// Total order on issues: [`Issue::sort_key`], then `details` (as JSON text) so
+/// that issues equal under the sort key still order independently of input order.
+fn compare_issues(a: &Issue, b: &Issue) -> Ordering {
+    a.sort_key().cmp(&b.sort_key()).then_with(|| {
+        let details = |i: &Issue| serde_json::to_string(&i.details).unwrap_or_default();
+        details(a).cmp(&details(b))
+    })
+}
+
+fn album_entry(unit: &AlbumUnit) -> AlbumEntry {
+    // Group by effective disc; `None` (unknown) sorts last.
+    let mut by_disc: BTreeMap<(bool, u32), Vec<&GroupedTrack>> = BTreeMap::new();
+    for track in &unit.tracks {
+        let key = match track.effective_disc {
+            Some(n) => (false, n),
+            None => (true, 0),
+        };
+        by_disc.entry(key).or_default().push(track);
+    }
+    let discs = by_disc
+        .into_iter()
+        .map(|((_, _), tracks)| disc_entry(&tracks))
+        .collect();
+    AlbumEntry {
+        id: unit.id.clone(),
+        path: unit.id.clone(),
+        title: unit.title.clone(),
+        album_artist: unit.album_artist.clone(),
+        disc_count: unit.disc_count,
+        track_count: u32::try_from(unit.tracks.len()).unwrap_or(u32::MAX),
+        discs,
+    }
+}
+
+/// `tracks` is non-empty and shares one effective disc.
+fn disc_entry(tracks: &[&GroupedTrack]) -> DiscEntry {
+    let number = tracks.first().and_then(|t| t.effective_disc);
+    // The folder is reported only when every track of the disc lives in the same one.
+    let first_folder = tracks.first().and_then(|t| t.disc_folder.as_ref());
+    let folder = first_folder
+        .filter(|f| tracks.iter().all(|t| t.disc_folder.as_ref() == Some(*f)))
+        .cloned();
+    let mut entries: Vec<TrackEntry> = tracks.iter().map(|t| track_entry(&t.info)).collect();
+    entries.sort_by(|a, b| {
+        (a.track_no.is_none(), a.track_no, &a.path).cmp(&(
+            b.track_no.is_none(),
+            b.track_no,
+            &b.path,
+        ))
+    });
+    DiscEntry {
+        number,
+        folder,
+        tracks: entries,
+    }
+}
+
+fn track_entry(t: &TrackInfo) -> TrackEntry {
+    TrackEntry {
+        path: t.rel_path.clone(),
+        format: t.format,
+        title: t.title.clone(),
+        artist: t.artist.clone(),
+        album: t.album.clone(),
+        album_artist: t.album_artist.clone(),
+        track_no: t.track_no,
+        track_total: t.track_total,
+        disc_no: t.disc_no,
+        disc_total: t.disc_total,
+        year: t.year,
+        genre: t.genre.clone(),
+        compilation: t.compilation,
+        duration_ms: t.duration_ms,
+        tag_types: t.tag_types.clone(),
+    }
 }
 
 impl Report {
