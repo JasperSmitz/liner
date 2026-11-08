@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 
-use crate::group::{AlbumUnit, most_common};
+use crate::group::{AlbumPartition, AlbumUnit};
 use crate::model::Issue;
 
 use super::codes;
@@ -14,24 +14,30 @@ pub(super) fn check(albums: &[AlbumUnit], out: &mut Vec<Issue>) {
     split_album(albums, out);
 }
 
+/// One album partition that has a split-album key.
+struct Keyed<'a> {
+    unit: &'a AlbumUnit,
+    part: AlbumPartition<'a>,
+}
+
 fn split_album(albums: &[AlbumUnit], out: &mut Vec<Issue>) {
-    let mut by_key: BTreeMap<(String, String), Vec<&AlbumUnit>> = BTreeMap::new();
+    let mut by_key: BTreeMap<(String, String), Vec<Keyed<'_>>> = BTreeMap::new();
     for unit in albums {
-        if let Some(key) = unit.album_key() {
-            by_key.entry(key).or_default().push(unit);
+        for part in unit.partitions() {
+            if let Some(key) = part.album_key() {
+                by_key.entry(key).or_default().push(Keyed { unit, part });
+            }
         }
     }
-    for mut units in by_key.into_values().filter(|u| u.len() > 1) {
-        units.sort_by(|a, b| a.id.cmp(&b.id));
-        let first = units[0];
+    // Partitions of one unit have different normalised titles, so each unit occurs
+    // at most once per key.
+    for ((artist_key, _), mut found) in by_key.into_iter().filter(|(_, f)| f.len() > 1) {
+        found.sort_by(|a, b| a.unit.id.cmp(&b.unit.id));
+        let first = &found[0].part;
         // album_key() is Some, so the title and an artist exist.
         let album = first.title.clone().unwrap_or_default();
-        let album_artist = first
-            .album_artist
-            .clone()
-            .or_else(|| most_common(first.tracks.iter().filter_map(|t| t.info.artist.as_deref())))
-            .unwrap_or_default();
-        let album_ids: Vec<String> = units.iter().map(|u| u.id.clone()).collect();
+        let album_artist = first.key_artist_spelling(&artist_key).unwrap_or_default();
+        let album_ids: Vec<String> = found.iter().map(|k| k.unit.id.clone()).collect();
         let message = format!(
             "Album {} by {} is split over {} directories: {}",
             quote(&album),
@@ -43,7 +49,7 @@ fn split_album(albums: &[AlbumUnit], out: &mut Vec<Issue>) {
             codes::SPLIT_ALBUM,
             message,
             None,
-            paths(units.iter().flat_map(|u| &u.tracks)),
+            paths(found.iter().flat_map(|k| k.part.tracks.iter().copied())),
             details([
                 ("album", json!(album)),
                 ("album_artist", json!(album_artist)),

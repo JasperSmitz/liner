@@ -28,6 +28,9 @@ fn disc_folder_name_table() {
         ("Disk.4", 4),
         ("cd999", 999),
         ("CD1 (Bonus)", 1),
+        ("CD1(Bonus)", 1),
+        ("Disc 2[Live]", 2),
+        ("cd3[", 3),
         ("Disc\u{00A0}7", 7),
     ];
     for (name, n) in positives {
@@ -50,6 +53,10 @@ fn disc_folder_name_table() {
         "",
         "Diśc 1",
         "Extras",
+        "CD(1)",
+        "\u{FF23}\u{FF24}1",
+        "CD\u{FF11}",
+        "CD1\u{FF11}",
     ];
     for name in negatives {
         assert_eq!(parse_disc_folder_name(name), None, "{name:?}");
@@ -147,9 +154,14 @@ fn multi_disc_detection() {
             disc_total: Some(1),
             ..t("C/01.flac")
         },
-        // a single disc folder is not multi-disc on its own
+        // a single disc folder 1 is not multi-disc on its own
         t("D/CD1/01.flac"),
         t("D/CD1/02.flac"),
+        // a single disc folder > 1 is
+        t("E/CD2/01.flac"),
+        // a disc folder next to loose files is
+        t("F/01.flac"),
+        t("F/CD1/01.flac"),
     ]);
     assert!(unit(&units, "A").is_multi_disc);
     assert!(unit(&units, "B").is_multi_disc);
@@ -157,6 +169,176 @@ fn multi_disc_detection() {
     let d = unit(&units, "D");
     assert!(!d.is_multi_disc);
     assert!(d.tracks.iter().all(|t| t.effective_disc == Some(1)));
+    let e = unit(&units, "E");
+    assert!(e.is_multi_disc);
+    assert_eq!(e.tracks[0].effective_disc, Some(2));
+    let f = unit(&units, "F");
+    assert!(f.is_multi_disc);
+    let eff: Vec<Option<u32>> = f.tracks.iter().map(|t| t.effective_disc).collect();
+    assert_eq!(eff, vec![Some(1), None]);
+}
+
+#[test]
+fn multi_disc_agrees_with_disc_count_for_folder_layouts() {
+    let units = group_tracks(vec![
+        // Review finding 3: loose files plus one CD2 folder, no tags.
+        t("A/01.flac"),
+        t("A/02.flac"),
+        t("A/CD2/01.flac"),
+        // Two disc folders.
+        t("B/CD1/01.flac"),
+        t("B/CD2/01.flac"),
+        // One CD1 folder only.
+        t("C/CD1/01.flac"),
+        // Plain folder.
+        t("D/01.flac"),
+        // Tag-only multi-disc.
+        TrackInfo {
+            disc_no: Some(1),
+            ..t("E/01.flac")
+        },
+        TrackInfo {
+            disc_no: Some(2),
+            ..t("E/02.flac")
+        },
+    ]);
+    for id in ["B", "C", "D", "E"] {
+        let u = unit(&units, id);
+        assert_eq!(u.is_multi_disc, u.disc_count > 1, "{id}");
+    }
+    // The loose files' disc is unknown (as when CD2's files carry a disc-2 tag
+    // instead), so only one disc is known although the unit is multi-disc.
+    let a = unit(&units, "A");
+    assert!(a.is_multi_disc);
+    assert_eq!(a.disc_count, 1);
+}
+
+#[test]
+fn disc_count_above_one_always_means_multi_disc() {
+    // The converse can fail when only one disc is known (disc 2 alone).
+    let layouts = [
+        vec![t("A/CD3/01.flac")],
+        vec![
+            TrackInfo {
+                disc_no: Some(2),
+                ..t("A/01.flac")
+            },
+            t("A/02.flac"),
+        ],
+        vec![t("A/01.flac"), t("A/Disc 1/01.flac")],
+        vec![
+            TrackInfo {
+                album: Some("X".into()),
+                disc_no: Some(2),
+                ..t("A/01.flac")
+            },
+            TrackInfo {
+                album: Some("Y".into()),
+                ..t("A/02.flac")
+            },
+        ],
+    ];
+    for tracks in layouts {
+        for u in group_tracks(tracks) {
+            assert!(u.disc_count <= 1 || u.is_multi_disc, "{u:#?}");
+        }
+    }
+}
+
+#[test]
+fn partitions_decide_multi_disc_independently() {
+    let units = group_tracks(vec![
+        TrackInfo {
+            album: Some("Alpha".into()),
+            ..t("D/a1.flac")
+        },
+        TrackInfo {
+            album: Some("Beta".into()),
+            disc_no: Some(2),
+            ..t("D/b1.flac")
+        },
+        TrackInfo {
+            album: Some("beta".into()),
+            ..t("D/b2.flac")
+        },
+        t("D/none.flac"),
+    ]);
+    let d = unit(&units, "D");
+    assert!(d.is_multi_disc);
+    let parts = d.partitions();
+    let labels: Vec<Option<&str>> = parts.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            Some("Tracks without an album tag"),
+            Some("Album 'Alpha'"),
+            Some("Album 'Beta'")
+        ]
+    );
+    let multi: Vec<bool> = parts.iter().map(|p| p.is_multi_disc).collect();
+    assert_eq!(multi, vec![false, false, true]);
+    let eff = |p: &str| {
+        d.tracks
+            .iter()
+            .find(|t| t.info.rel_path == p)
+            .unwrap()
+            .effective_disc
+    };
+    assert_eq!(eff("D/a1.flac"), Some(1));
+    assert_eq!(eff("D/none.flac"), Some(1));
+    assert_eq!(eff("D/b1.flac"), Some(2));
+    assert_eq!(eff("D/b2.flac"), None);
+
+    // A unit with one album title (plus untagged tracks) is one unlabelled partition.
+    let units = group_tracks(vec![
+        TrackInfo {
+            album: Some("Alpha".into()),
+            ..t("E/1.flac")
+        },
+        t("E/2.flac"),
+    ]);
+    let parts = units[0].partitions();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].label, None);
+    assert_eq!(parts[0].tracks.len(), 2);
+}
+
+#[test]
+fn album_keys_are_per_partition() {
+    // Codex finding: crossed majorities. Unit-wide most common title is A and album
+    // artist Y, but no track is A by Y.
+    let mut tracks = Vec::new();
+    for (i, (album, aa)) in [
+        ("A", "X"),
+        ("A", "X"),
+        ("A", "X"),
+        ("B", "Y"),
+        ("B", "Y"),
+        ("C", "Y"),
+        ("C", "Y"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        tracks.push(TrackInfo {
+            album: Some(album.into()),
+            album_artist: Some(aa.into()),
+            ..t(&format!("Mixed/{i}.flac"))
+        });
+    }
+    let units = group_tracks(tracks);
+    let mixed = unit(&units, "Mixed");
+    assert_eq!(mixed.album_key(), None);
+    let keys: Vec<Option<(String, String)>> =
+        mixed.partitions().iter().map(|p| p.album_key()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            Some(("x".into(), "a".into())),
+            Some(("y".into(), "b".into())),
+            Some(("y".into(), "c".into())),
+        ]
+    );
 }
 
 #[test]
@@ -305,6 +487,32 @@ fn album_key_rules() {
     assert_eq!(unit(&units, "C").album_key(), None);
     assert_eq!(unit(&units, "D").album_key(), None);
     assert_eq!(unit(&units, "E").album_key(), None);
+}
+
+#[test]
+fn album_key_skips_various_artists_and_compilations() {
+    let mk = |rel: &str, aa: &str, compilation: bool| TrackInfo {
+        album: Some("Greatest Hits".into()),
+        album_artist: Some(aa.into()),
+        compilation,
+        ..t(rel)
+    };
+    let units = group_tracks(vec![
+        mk("A/1.flac", "Various Artists", false),
+        mk("B/1.flac", " VA ", false),
+        mk("C/1.flac", "VARIOUS", false),
+        mk("D/1.flac", "Queen", true),
+        mk("D/2.flac", "Queen", true),
+        mk("E/1.flac", "Queen", true),
+        mk("E/2.flac", "Queen", false),
+    ]);
+    for id in ["A", "B", "C", "D"] {
+        assert_eq!(unit(&units, id).album_key(), None, "{id}");
+    }
+    assert_eq!(
+        unit(&units, "E").album_key(),
+        Some(("queen".into(), "greatest hits".into()))
+    );
 }
 
 #[test]

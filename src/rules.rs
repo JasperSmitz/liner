@@ -193,7 +193,7 @@ pub const CATALOG: &[RuleInfo] = &[
         codes::INCONSISTENT_TAG_SPELLING,
         Warning,
         Album,
-        "Album or album artist differs only in case or whitespace",
+        "Album or album artist differs only in case, whitespace, Unicode form or quote style",
     ),
     rule(
         codes::PARTIAL_ALBUM_ARTIST,
