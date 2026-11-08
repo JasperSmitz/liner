@@ -154,6 +154,81 @@ built-in default. Boolean options can only be switched on from the command line.
 | `1` | Issues at or above `--fail-on` (default `error`), or `errors[]` is non-empty. Unreadable files count as error severity, so only `--fail-on never` ignores them. `--min-severity` does not affect the exit code. |
 | `2` | Usage or runtime error: bad arguments, missing/invalid library root, config read/parse error, unsafe or unwritable `--output`. The message goes to stderr as `liner: ...`. |
 
+## Scheduled runs on a server
+
+Liner is a one-shot command, so a systemd timer is the natural way to keep a
+fresh report next to a server's copy of the library (for example for a
+dashboard that reads the JSON report). The release binary built on a current
+distribution needs at most `GLIBC_2.34`, so it also runs on Debian 12; check
+with `objdump -T target/release/liner | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`.
+
+Create a system user for it once (and give it read access to the library, e.g.
+by adding it to the group that owns the files):
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin liner
+```
+
+`/etc/systemd/system/liner-scan.service`:
+
+```ini
+[Unit]
+Description=Liner music library metadata report
+
+[Service]
+Type=oneshot
+User=liner
+Group=liner
+# /var/lib/liner is owned by liner and world-readable; the report is mode 0644.
+StateDirectory=liner
+StateDirectoryMode=0755
+UMask=0022
+ExecStart=/usr/local/bin/liner scan /srv/music --format json \
+    --output /var/lib/liner/report.json --fail-on never --config /dev/null
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+Nice=10
+IOSchedulingClass=idle
+```
+
+`/etc/systemd/system/liner-scan.timer`:
+
+```ini
+[Unit]
+Description=Daily Liner music library report
+
+[Timer]
+OnCalendar=*-*-* 05:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Then `systemctl enable --now liner-scan.timer`. Notes:
+
+- **`--fail-on never` is required here.** Without it, any issue makes the
+  service exit 1, so the unit (and any monitoring of the timer) shows a failure
+  although the scan worked. A real failure (unreadable root, unwritable output)
+  still exits 2.
+- Do not use `DynamicUser=yes`: systemd then keeps the state directory under
+  `/var/lib/private` (mode 0700), so no other service can read the report.
+- `--config /dev/null` keeps the run independent of any user config. The
+  library must be readable by the `liner` user (world-readable files are
+  enough); the report ends up as `/var/lib/liner/report.json`, mode 0644, so
+  other services can read it. Schedule the timer after the daily library sync
+  has normally finished (a later `OnCalendar=` time), so the report describes
+  the synced state.
+- Alternatively run Liner on the machine with the master library and copy the
+  report to the server; the report must not be written inside the library
+  (`--output` refuses that), so copy it separately.
+
 ## How albums are grouped
 
 An album is a **directory** containing audio files (id = path relative to the
