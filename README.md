@@ -19,8 +19,13 @@ Formats: FLAC, MP3, Ogg Vorbis, Opus, MP4/M4A, WAV, and whatever else
   `remove_from*`, ...) are banned crate-wide through `clippy.toml`; the single
   exception is the report file you ask for with `--output`, which must be outside
   the library, must not have an audio extension, and is never written through a
-  symlink or hard link. `tests/readonly.rs` checks that a scanned library is
-  byte-, mtime- and permission-identical afterwards.
+  symlink or hard link (it is written to a new temporary file and renamed into
+  place). `tests/readonly.rs` checks that a scanned library is byte-, mtime- and
+  permission-identical afterwards.
+- **No terminal injection.** Tag values and file names are untrusted: human
+  output shows control characters (ESC, newline, ...) as visible `\u{1b}`-style
+  escapes, and JSON `message` texts are escaped the same way, so they are always
+  single-line.
 - **No network access.** Liner makes no network requests at all.
 - **No panics on bad files.** Corrupt, truncated or mislabelled files end up in the
   report's `errors[]` list; the scan continues.
@@ -105,7 +110,17 @@ liner schema > liner-report.v1.schema.json
 - `--output FILE` writes the report to a file instead of stdout. It is refused
   (exit 2, before scanning) if the file is inside the library, has an audio
   extension, is a directory, symlink or other non-regular file, or its parent
-  directory does not exist. A failed run never truncates an existing file.
+  directory does not exist. "Inside the library" is decided by device and inode
+  of the parent directory and each of its ancestors, so a symlinked parent or a
+  bind-mount alias of the library is refused too. The report is written to a
+  temporary file `.<name>.liner-tmp-<pid>` in the same directory, synced, and then
+  renamed over `FILE`; a failed run (including a failed write, e.g. a full disk)
+  never changes or truncates an existing report and leaves no temporary file.
+  An existing `FILE` is replaced by a new file (mode 0644 minus umask), and is
+  refused if it has other hard links.
+- With `--follow-symlinks`, a directory symlinked *into* the library from
+  elsewhere is scanned but is not recognised as part of the library by the
+  `--output` check: do not put the report inside such a directory.
 - `--color auto` (default) colours human output only on a terminal with
   `NO_COLOR` unset or empty. JSON is never coloured; an `--output` file only with
   `--color always`.

@@ -21,7 +21,8 @@ src/
   group.rs     album units, disc folders, effective disc
   rules.rs     rule catalogue (codes, severity, scope) + run_all
   report.rs    serialisable report = public JSON contract, SCHEMA_VERSION, schema
-  render.rs    human + JSON renderers, the single sanctioned output-file writer
+  render.rs    human + JSON renderers, control-char escaping, the single
+               sanctioned output-file writer (OutputTarget)
   config.rs    optional TOML config
   cli.rs       clap definitions, settings resolution, command dispatch
 schema/liner-report.v1.schema.json   committed JSON Schema (checked by tests/schema.rs)
@@ -78,8 +79,15 @@ Key contracts (details in module docs):
   `model::normalize_for_compare` (Unicode NFC, curly quotes folded to straight
   ones, trim, collapse whitespace, Unicode lowercase).
   Empty/whitespace text and numeric `0` are read as "absent".
+- **Untrusted text.** Tags and file names may contain control characters. The
+  human renderer passes every tag- or path-derived string through
+  `render::escape_control` (each `char::is_control` becomes a visible `\u{XX}`),
+  and `RuleInfo::issue` does the same for `Issue.message`, so JSON messages are
+  single-line. JSON paths and tag values stay exact (JSON escapes them).
 - **Determinism.** All outputs are sorted (scan by rel_path, units by id, issues by
-  `Issue::sort_key`, errors by path; maps are `BTreeMap`). Parallel reading must not
+  `Issue::sort_key`, errors by rel_path then real path; maps are `BTreeMap`).
+  `errors[]` is deduplicated on the real path, so two files whose lossy names
+  collide are both listed. Parallel reading must not
   affect output. Same library + same timestamp ⇒ byte-identical JSON.
 
 ## CLI
@@ -121,12 +129,17 @@ liner schema    # print the report JSON Schema
   `--output` file only with `--color always`.
 - A closed stdout (`liner scan | head`) ends output quietly; the exit code is still
   computed from the report.
-- `--output FILE`: cheap checks run before the scan (no audio extension in any
-  case, not an existing non-regular file or symlink, parent directory exists, and
-  the canonicalised parent is **not inside the canonicalised library root**). The
-  report is rendered to memory and the file is opened only after the scan and
-  rendering succeeded, so a failed run never empties an existing file (see
-  "Read-only guarantees").
+- `--output FILE`: `render::check_output_path` runs before the scan (no audio
+  extension in any case, not an existing non-regular file or symlink, has a file
+  name, parent directory exists) and **opens the parent directory**, keeping the
+  handle in an `OutputTarget`. The parent must not be inside the library: walking
+  up from that handle (`openat(.., O_PATH)`) to the filesystem root, no ancestor
+  may have the library root's `(st_dev, st_ino)`; this catches symlinked parents
+  and bind-mount aliases. The report is rendered to memory and written only after
+  the scan and rendering succeeded, by `OutputTarget::write`, atomically (see
+  "Read-only guarantees"), so a failed run never changes an existing report.
+  Not detected: with `--follow-symlinks`, a directory symlinked into the library
+  from outside (documented in the README).
 
 ## Error handling
 
@@ -149,14 +162,25 @@ liner schema    # print the report JSON Schema
    `remove_from*`, `std::fs::{write, copy, rename, remove_*, set_permissions}`,
    `File::create[_new]` and `OpenOptions::new`. CI runs
    `cargo clippy --all-targets -- -D warnings`, so a violation fails the build.
-3. The only exemption in non-test code is `render::create_output_file` (the
-   user-requested report). It refuses paths with an audio extension, opens with
-   `O_WRONLY|O_CREAT|O_NOFOLLOW|O_NONBLOCK` (no `O_TRUNC`, mode 0644), checks the
-   opened handle (`fstat`: must be a regular file with `nlink == 1`, so neither a
-   symlink nor a hard link to an audio file can be written through), and only then
-   truncates. `render::check_output_path` additionally refuses any `--output`
-   inside the library root, before the scan. A mistyped `--output` cannot clobber
-   music or create files in the library.
+   `libc::{rename, renameat, unlink, unlinkat, creat}` are banned too and allowed
+   only on `render::OutputTarget::write_with`. `libc::open`/`openat` cannot be
+   banned (they are also used read-only, for directory handles), so by convention
+   only `OutputTarget::create_temp` passes `O_CREAT`.
+3. The only exemption in non-test code is `render::OutputTarget` (the
+   user-requested report). Everything happens relative to the output directory
+   handle opened by `check_output_path`, so swapping the parent path during the
+   scan cannot redirect the write. `OutputTarget::write`:
+   1. repeats the library ancestry check (the directory may have been moved);
+   2. creates `.<name>.liner-tmp-<pid>` with
+      `openat(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, 0644)`, writes the
+      whole report and `fsync`s it;
+   3. `fstatat(name, AT_SYMLINK_NOFOLLOW)`: the destination must be absent or a
+      regular file with `nlink == 1` (no symlink, no hard link to an audio file);
+   4. `renameat`s the temp file over `name` and `fsync`s the directory.
+   On any failure after step 2 the temp file is `unlinkat`ed. Renaming replaces a
+   directory entry and never writes into an existing inode, and the name never
+   has an audio extension. A mistyped `--output` cannot clobber music or create
+   files in the library, and a failed write never truncates an existing report.
 4. Test code that writes tags (`tests/common/mod.rs`) opts out explicitly and only
    writes inside its own `TempDir`. Tests never read the developer's real config
    (`XDG_CONFIG_HOME`/`HOME` are overridden) and never touch `/storage/music`.

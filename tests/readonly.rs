@@ -253,3 +253,73 @@ fn snapshot_detects_changes() {
     assert!(after.len() == before.len() + 1);
     assert!(after[std::ffi::OsStr::new("Broken")] != before[std::ffi::OsStr::new("Broken")]);
 }
+
+/// Codex final-review #1: the output parent is swapped for a symlink into the
+/// library after validation (i.e. during the scan). The write goes through the
+/// directory handle opened at validation time, so it lands in the original
+/// directory and the library is untouched.
+#[test]
+#[allow(clippy::disallowed_methods)] // test-only: renames temp directories
+fn output_parent_swapped_after_validation_cannot_redirect_the_write() {
+    let lib = build_library();
+    let before = snapshot(lib.root());
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+
+    let target = liner::render::check_output_path(&out.join("report.json"), lib.root()).unwrap();
+    std::fs::rename(&out, tmp.path().join("original-out")).unwrap();
+    std::os::unix::fs::symlink(lib.root(), &out).unwrap();
+    target.write(b"report\n").unwrap();
+
+    assert_unchanged(&lib, &before, "swapped output parent");
+    assert_eq!(
+        std::fs::read(tmp.path().join("original-out/report.json")).unwrap(),
+        b"report\n"
+    );
+}
+
+/// The output directory itself is moved into the library during the scan: the
+/// library check is repeated before writing.
+#[test]
+#[allow(clippy::disallowed_methods)] // test-only: moves a temp directory into the temp library
+fn output_directory_moved_into_library_is_refused() {
+    let lib = build_library();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let target = liner::render::check_output_path(&out.join("report.json"), lib.root()).unwrap();
+    let moved = lib.root().join("Band/moved");
+    std::fs::rename(&out, &moved).unwrap();
+    let err = target.write(b"report\n").unwrap_err();
+    assert!(err.to_string().contains("inside the library"), "{err}");
+    assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 0);
+}
+
+/// A failing write removes the temporary file and keeps the old report.
+#[test]
+#[allow(clippy::disallowed_methods)] // test-only: writes the old report into a temp dir
+fn failed_write_removes_temporary_file() {
+    let lib = build_library();
+    let tmp = tempfile::tempdir().unwrap();
+    let report = tmp.path().join("report.json");
+    std::fs::write(&report, "old\n").unwrap();
+    let target = liner::render::check_output_path(&report, lib.root()).unwrap();
+    let err = target
+        .write_with(b"new\n", |file, bytes| {
+            use std::io::Write;
+            file.write_all(&bytes[..2])?;
+            Err(std::io::ErrorKind::StorageFull.into())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, liner::error::LinerError::Output(_)),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&report).unwrap(), "old\n");
+    let names: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from("report.json")]);
+}

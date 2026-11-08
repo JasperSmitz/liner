@@ -548,3 +548,120 @@ fn relative_library_path_is_relative_to_config_file() {
     );
     assert_eq!(v["root"], abs(&cfg_dir.path().join("music")));
 }
+
+/// Directory entries other than `keep` (the report must be the only thing left).
+fn dir_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn output_leaves_no_temporary_file() {
+    let lib = common::Library::new();
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("report.json");
+    for _ in 0..2 {
+        // Create, then replace.
+        liner()
+            .args(["scan", "--format", "json"])
+            .arg(lib.root())
+            .arg("--output")
+            .arg(&file)
+            .assert()
+            .code(0);
+        assert_eq!(dir_names(out.path()), ["report.json"]);
+    }
+    let mode =
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions());
+    assert_eq!(mode & 0o777 & !0o022, 0o644 & !0o022, "{mode:o}");
+}
+
+#[test]
+fn output_through_symlinked_parent_into_library_is_refused() {
+    let (lib, track) = library_with_track();
+    let before = snapshot(&track);
+    let out = tempfile::tempdir().unwrap();
+    // A symlink to the library root, and a chain of symlinks into a sub-directory.
+    std::os::unix::fs::symlink(lib.root(), out.path().join("lib")).unwrap();
+    std::os::unix::fs::symlink(lib.path("A"), out.path().join("a1")).unwrap();
+    std::os::unix::fs::symlink(out.path().join("a1"), out.path().join("a2")).unwrap();
+    for target in ["lib/r.json", "lib/A/B/r.json", "a2/r.json", "a2/B/r.json"] {
+        liner()
+            .args(["scan", "--format", "json"])
+            .arg(lib.root())
+            .arg("--output")
+            .arg(out.path().join(target))
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("inside the library"));
+    }
+    assert!(!lib.path("r.json").exists());
+    assert!(!lib.path("A/r.json").exists());
+    assert!(!lib.path("A/B/r.json").exists());
+    assert_eq!(snapshot(&track), before);
+}
+
+#[test]
+fn hard_link_destination_is_refused_without_leftovers() {
+    let (lib, track) = library_with_track();
+    let before = snapshot(&track);
+    let out = tempfile::tempdir().unwrap();
+    let report = out.path().join("report.txt");
+    std::fs::hard_link(&track, &report).unwrap();
+    liner()
+        .arg("scan")
+        .arg(lib.root())
+        .arg("--output")
+        .arg(&report)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("hard links"));
+    assert_eq!(snapshot(&track), before);
+    assert_eq!(snapshot(&report), before);
+    assert_eq!(dir_names(out.path()), ["report.txt"]);
+}
+
+/// A write that fails half-way (here: `RLIMIT_FSIZE`, as on a full disk or quota)
+/// leaves an existing report exactly as it was, and no temporary file behind.
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_write_preserves_existing_report() {
+    use std::os::unix::process::CommandExt;
+    let lib = common::Library::new();
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("report.json");
+    let old = "o".repeat(1500);
+    write(&file, &old);
+
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_liner"));
+    cmd.env("XDG_CONFIG_HOME", "/nonexistent-liner-test-config")
+        .env("HOME", "/nonexistent-liner-test-home")
+        .args(["scan", "--format", "json"])
+        .arg(lib.root())
+        .arg("--output")
+        .arg(&file);
+    // SAFETY: only async-signal-safe libc calls between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: 64,
+                rlim_max: 64,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let output = cmd.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("failed to write output"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), old);
+    assert_eq!(dir_names(out.path()), ["report.json"]);
+}

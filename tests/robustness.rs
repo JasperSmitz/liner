@@ -311,3 +311,47 @@ fn corrupt_files_are_errors_not_crashes() {
     // Errors only affect the exit code through --fail-on.
     scan_json(&lib, &["--fail-on", "never"], 0);
 }
+
+/// Two zero-byte files whose names differ only in invalid UTF-8 bytes have the same
+/// lossy path and the same error; both must be listed and counted.
+#[cfg(target_os = "linux")]
+#[test]
+fn colliding_non_utf8_error_paths_are_both_reported() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let lib = Library::new();
+    lib.add_raw_at(OsStr::from_bytes(b"a\xfe.flac"), b"");
+    lib.add_raw_at(OsStr::from_bytes(b"a\xff.flac"), b"");
+
+    let r = scan_json(&lib, &[], 1);
+    let errors = r["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(errors.iter().all(|e| e["path"] == "a\u{FFFD}.flac"));
+    assert_eq!(errors[0]["message"], errors[1]["message"]);
+    assert_eq!(r["summary"]["unreadable_files"], 2);
+}
+
+/// A file name with ESC and newline cannot inject terminal escapes or fake lines
+/// into human output (shown escaped); JSON keeps the exact name.
+#[cfg(target_os = "linux")]
+#[test]
+fn control_characters_in_file_names_are_escaped() {
+    let lib = Library::new();
+    let name = "Evil/x\x1b[2J\nfake line.flac";
+    lib.add_raw(name, b"");
+    let r = scan_json(&lib, &[], 1);
+    assert_eq!(r["errors"][0]["path"], name);
+
+    let out = liner()
+        .args(["scan", "--color", "never"])
+        .arg(lib.root())
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains('\x1b'), "{text:?}");
+    assert!(
+        text.contains("Evil/x\\u{1b}[2J\\u{a}fake line.flac\n"),
+        "{text}"
+    );
+    assert!(!text.lines().any(|l| l.starts_with("fake line")), "{text}");
+}

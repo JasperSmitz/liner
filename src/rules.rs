@@ -77,7 +77,8 @@ impl RuleInfo {
             code: self.code.to_owned(),
             severity: self.severity,
             scope: self.scope,
-            message: message.into(),
+            // Messages embed tag values; keep them single-line and escape-free.
+            message: crate::render::escape_control(&message.into()).into_owned(),
             album_id: album_id.map(str::to_owned),
             paths,
             details,

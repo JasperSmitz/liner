@@ -5,6 +5,7 @@
 //!   LINER_UPDATE_GOLDEN=1 cargo test --test report
 
 use std::collections::BTreeMap;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use liner::group::{AlbumUnit, GroupedTrack};
@@ -635,4 +636,110 @@ fn human_output_mentions_hidden_issues() {
         text.contains("1 errors, 4 warnings, 0 info (2 below warning hidden)"),
         "{text}"
     );
+}
+
+/// Tag values and file names are untrusted: control characters (ESC, newline, ...)
+/// must never reach the terminal raw, and JSON messages stay single-line.
+#[test]
+fn control_characters_are_escaped() {
+    let id = "Evil\x1b[2J/Al\nbum";
+    let title = "Title\x1b]0;pwned\x07";
+    let path = "Evil\x1b[2J/Al\nbum/0\x1b[31m1\nfake line.flac";
+    let album = AlbumUnit {
+        id: id.to_owned(),
+        tracks: vec![grouped(
+            track(path, |t| TrackInfo {
+                album: Some(title.to_owned()),
+                ..t
+            }),
+            None,
+            Some(1),
+        )],
+        is_multi_disc: false,
+        title: Some(title.to_owned()),
+        album_artist: Some("Art\u{9b}ist".to_owned()),
+        disc_count: 1,
+    };
+    let issues = vec![issue(
+        codes::INCONSISTENT_TAG_SPELLING,
+        &format!("Album title is spelled 2 ways: '{title}', 'x\ny'"),
+        Some(id),
+        &[path],
+        json!({}),
+    )];
+    let inputs = Inputs {
+        scan: ScanResult {
+            audio_files: vec![],
+            other_files: 0,
+            errors: vec![file_error(
+                "bad\x1b[1m\nname.flac",
+                FileErrorKind::Corrupt,
+                "broken\x1b[0m\nreason",
+            )],
+        },
+        read_errors: vec![],
+        albums: vec![album],
+        issues,
+    };
+    let report = build(&inputs);
+
+    // JSON: the message is sanitised at the source; paths stay exact (JSON-escaped).
+    let message = &report.issues[0].message;
+    assert!(!message.chars().any(char::is_control), "{message:?}");
+    assert!(message.contains("Title\\u{1b}]0;pwned\\u{7}"), "{message}");
+    assert!(message.contains("'x\\u{a}y'"), "{message}");
+    assert_eq!(report.issues[0].paths, vec![path.to_owned()]);
+
+    for color in [false, true] {
+        let text = human(&report, color);
+        let plain: String = text.replace("\x1b[1m", "").replace("\x1b[0m", "");
+        let plain = plain.replace("\x1b[31m", "").replace("\x1b[33m", "");
+        assert!(
+            !plain.chars().any(|c| c.is_control() && c != '\n'),
+            "raw control character in:\n{text:?}"
+        );
+        assert!(
+            text.contains(
+                "Evil\\u{1b}[2J/Al\\u{a}bum  \"Title\\u{1b}]0;pwned\\u{7}\" by Art\\u{9b}ist"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("- 0\\u{1b}[31m1\\u{a}fake line.flac\n"),
+            "{text}"
+        );
+        assert!(text.contains("bad\\u{1b}[1m\\u{a}name.flac\n"), "{text}");
+        assert!(text.contains("broken\\u{1b}[0m\\u{a}reason\n"), "{text}");
+        assert!(!text.lines().any(|l| l.starts_with("fake line")), "{text}");
+    }
+}
+
+/// Two distinct files whose names collide under lossy UTF-8 conversion are two
+/// entries in `errors[]`, even with the same kind and message.
+#[test]
+fn colliding_lossy_error_paths_are_not_merged() {
+    let error = |real: &[u8]| FileError {
+        path: Path::new(ROOT).join(std::ffi::OsStr::from_bytes(real)),
+        rel_path: "a\u{fffd}.flac".to_owned(),
+        kind: FileErrorKind::Corrupt,
+        message: "file is empty".to_owned(),
+    };
+    let inputs = Inputs {
+        scan: ScanResult {
+            audio_files: vec![],
+            other_files: 0,
+            errors: vec![],
+        },
+        read_errors: vec![
+            error(b"a\xff.flac"),
+            error(b"a\xfe.flac"),
+            error(b"a\xff.flac"),
+        ],
+        albums: vec![],
+        issues: vec![],
+    };
+    let report = build(&inputs);
+    // The exact duplicate is dropped, the colliding distinct file is kept.
+    assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+    assert_eq!(report.summary.unreadable_files, 2);
 }

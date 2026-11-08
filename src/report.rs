@@ -187,19 +187,22 @@ pub fn build_report(input: ReportInput<'_>) -> Report {
     let mut issues = input.issues.to_vec();
     issues.sort_by(compare_issues);
 
-    let mut errors: Vec<FileErrorEntry> = input
-        .scan
-        .errors
-        .iter()
-        .chain(input.read_errors)
+    // Sort and dedup on the real path, not the lossy `rel_path`: two distinct
+    // non-UTF-8 names can map to the same display string and must both be counted.
+    let mut file_errors: Vec<&FileError> =
+        input.scan.errors.iter().chain(input.read_errors).collect();
+    file_errors.sort_by(|a, b| {
+        (&a.rel_path, &a.path, a.kind, &a.message).cmp(&(&b.rel_path, &b.path, b.kind, &b.message))
+    });
+    file_errors.dedup_by(|a, b| (&a.path, a.kind, &a.message) == (&b.path, b.kind, &b.message));
+    let errors: Vec<FileErrorEntry> = file_errors
+        .into_iter()
         .map(|e| FileErrorEntry {
             path: e.rel_path.clone(),
             kind: e.kind,
             message: e.message.clone(),
         })
         .collect();
-    errors.sort_by(|a, b| (&a.path, a.kind, &a.message).cmp(&(&b.path, b.kind, &b.message)));
-    errors.dedup();
 
     let mut report = Report {
         schema_version: SCHEMA_VERSION.to_owned(),
