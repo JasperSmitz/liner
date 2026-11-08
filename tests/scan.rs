@@ -190,6 +190,26 @@ fn broken_symlink_with_following_is_walk_error() {
 
 #[cfg(unix)]
 #[test]
+fn unreadable_root_is_fatal_io_error() {
+    let lib = Library::new();
+    lib.add("Lib/A/01.flac", Fixture::Flac, &Tags::new());
+    lib.chmod("Lib", 0o000);
+    let root = lib.path("Lib");
+    if std::fs::read_dir(&root).is_ok() {
+        eprintln!("skipping: running with permission override (root?)");
+        return;
+    }
+    match scan(&root, &ScanOptions::default()) {
+        Err(LinerError::Io { path, source }) => {
+            assert_eq!(path, root);
+            assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+        other => panic!("expected LinerError::Io, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn unreadable_directory_is_walk_error_and_scan_continues() {
     let lib = Library::new();
     lib.add("A/01.flac", Fixture::Flac, &Tags::new());

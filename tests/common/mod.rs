@@ -5,17 +5,23 @@
 //! Builds a synthetic library in a `TempDir` by copying the committed silent
 //! templates (`tests/fixtures/templates/silence.*`) and writing tags onto the COPIES
 //! with lofty. This is the only code in the repository that writes tags, and it only
-//! ever touches files inside its own temp directory (see ADR 0004).
+//! ever touches files inside its own temp directory (see ADR 0004). This is enforced:
+//! every `rel` must be relative with only normal components (no `/x`, `..`, `.`), and
+//! writes refuse to go through a symlink or a directory that resolves outside the
+//! temp root. Violations panic.
 #![allow(dead_code)] // each test crate uses a different subset
 #![allow(clippy::disallowed_methods)] // writing tags/files into the temp library is the point
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use liner::scan::ScannedFile;
+use lofty::TextEncoding;
 use lofty::config::WriteOptions;
 use lofty::file::TaggedFileExt;
+use lofty::id3::v2::{Frame, FrameId, Id3v2Tag, TextInformationFrame};
+use lofty::mp4::Ilst;
 use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
 use tempfile::TempDir;
 
@@ -228,8 +234,35 @@ impl Library {
     }
 
     /// Absolute path of `rel` inside the library (nothing is created).
+    ///
+    /// Panics unless `rel` is relative and made only of normal components, so no
+    /// helper can be pointed outside the temp directory.
     pub fn path(&self, rel: impl AsRef<Path>) -> PathBuf {
+        let rel = rel.as_ref();
+        assert!(
+            rel.components().all(|c| matches!(c, Component::Normal(_))),
+            "fixture path {rel:?} must be relative with only normal components"
+        );
         self.dir.path().join(rel)
+    }
+
+    /// `path` must resolve inside the temp root before anything writes to it: its
+    /// parent directory (after following symlinks) must be inside the root and, if
+    /// `path` exists, it must not be a symlink.
+    fn assert_confined(&self, path: &Path) {
+        let root = self.dir.path().canonicalize().expect("canonicalize root");
+        let parent = path.parent().expect("fixture path has a parent");
+        let parent = parent.canonicalize().expect("canonicalize fixture dir");
+        assert!(
+            parent.starts_with(&root),
+            "fixture path {path:?} resolves outside the temp library"
+        );
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            assert!(
+                !meta.file_type().is_symlink(),
+                "refusing to write through symlink {path:?}"
+            );
+        }
     }
 
     /// Copy the `fixture` template to `rel` (parent dirs created) and write `tags`
@@ -287,10 +320,54 @@ impl Library {
     /// existing tag of that type.
     pub fn add_tag(&self, rel: impl AsRef<Path>, tag_type: TagType, tags: &Tags) {
         let path = self.path(rel);
+        self.assert_confined(&path);
         let mut tag = Tag::new(tag_type);
         tags.apply(&mut tag);
         tag.save_to_path(&path, WriteOptions::default())
             .expect("write extra tag");
+    }
+
+    /// Copy `fixture` (MP3 or WAV) to `rel` and write a native ID3v2 tag holding
+    /// exactly the given text frames, e.g. `[("TRCK", "3/12"), ("TPOS", "1/2"),
+    /// ("TCMP", "1")]`. Use this rather than [`Library::add_with`] for raw number
+    /// strings: lofty's generic `Tag` -> ID3v2 conversion drops non-integer
+    /// track/disc values such as `3/12`.
+    pub fn add_id3v2_frames(
+        &self,
+        rel: &str,
+        fixture: Fixture,
+        frames: &[(&str, &str)],
+    ) -> PathBuf {
+        assert!(
+            matches!(fixture, Fixture::Mp3 | Fixture::Wav),
+            "ID3v2 frames need an MP3 or WAV fixture, not {fixture:?}"
+        );
+        let dst = self.add_untagged(rel, fixture);
+        let mut tag = Id3v2Tag::new();
+        for &(id, value) in frames {
+            let id = FrameId::new(id.to_owned()).expect("valid ID3v2 frame id");
+            tag.insert(Frame::Text(TextInformationFrame::new(
+                id,
+                TextEncoding::UTF8,
+                value.to_owned(),
+            )));
+        }
+        tag.save_to_path(&dst, WriteOptions::default())
+            .expect("write ID3v2 tag to template copy");
+        dst
+    }
+
+    /// Copy the M4A template to `rel` and write a native MP4 `ilst` built by `edit`
+    /// (e.g. `trkn` with total but number 0 via `set_track_total`, or
+    /// `set_flag(AtomIdent::Fourcc(*b"cpil"), false)`), bypassing the generic
+    /// `Tag` conversion.
+    pub fn add_mp4_with(&self, rel: &str, edit: impl FnOnce(&mut Ilst)) -> PathBuf {
+        let dst = self.add_untagged(rel, Fixture::M4a);
+        let mut ilst = Ilst::new();
+        edit(&mut ilst);
+        ilst.save_to_path(&dst, WriteOptions::default())
+            .expect("write ilst to template copy");
+        dst
     }
 
     /// Copy the template without writing any tag.
@@ -343,7 +420,7 @@ impl Library {
 
     /// Create directory `rel` (and parents); for empty or hidden directories.
     pub fn mkdir(&self, rel: impl AsRef<Path>) -> PathBuf {
-        let dst = self.path(rel);
+        let dst = self.prepare(rel);
         std::fs::create_dir_all(&dst).expect("create dir");
         dst
     }
@@ -375,16 +452,20 @@ impl Library {
     pub fn chmod(&self, rel: impl AsRef<Path>, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         let path = self.path(rel);
+        self.assert_confined(&path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
             .expect("set permissions");
         self.restricted.lock().unwrap().push(path);
     }
 
+    /// Checked destination for a new entry at `rel`: parent dirs created, then
+    /// confined to the temp root (see [`Library::path`]).
     fn prepare(&self, rel: impl AsRef<Path>) -> PathBuf {
-        let dst = self.dir.path().join(rel);
+        let dst = self.path(rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).expect("create fixture dirs");
         }
+        self.assert_confined(&dst);
         dst
     }
 }

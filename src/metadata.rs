@@ -6,15 +6,24 @@
 //! - Uses only lofty's read API (`Probe`/`read_from_path` with `ParseOptions`
 //!   `read_cover_art(false)`); never any `save`/`remove` API (enforced by clippy.toml).
 //! - Format is detected from content (lofty probe), falling back to extension.
-//! - Field source: the primary tag first, then other tags present in the file
-//!   (e.g. ID3v2 before ID3v1/APE) per field.
+//! - Field source, per field: the primary tag first, then the other rich tags
+//!   (ID3v2/APE/Vorbis/MP4/RIFF/AIFF) in file order, and ID3v1 (Latin-1, 30-char
+//!   fields) last.
+//! - A parser panic (lofty has panicked on fuzzed input) is caught and reported as
+//!   `FileErrorKind::Corrupt` ("parser panicked: ..."); it is not printed to stderr.
+//! - A duration over one week is treated as unknown (`None`): it can only come
+//!   from a corrupt header (e.g. an absurd Ogg granule position).
 //! - Empty/whitespace-only text => `None`; numeric `0` => `None`.
 //! - Any failure (I/O, unsupported, corrupt, zero-byte) => a `FileError` in
 //!   `errors`, never a panic. Zero-byte files are `FileErrorKind::Corrupt`.
 //! - `read_all` reads in parallel (rayon) and returns both vectors sorted by
 //!   `rel_path`, so the output is independent of thread scheduling.
 
+use std::cell::Cell;
 use std::io::ErrorKind;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Once;
+use std::time::Duration;
 
 use lofty::config::ParseOptions;
 use lofty::error::FileParseError;
@@ -52,7 +61,8 @@ pub fn read_track(file: &ScannedFile) -> Result<TrackInfo, FileError> {
         ));
     }
 
-    let tagged = probe_and_read(&file.path).map_err(|(kind, message)| fail(kind, message))?;
+    let tagged =
+        guarded_probe_and_read(&file.path).map_err(|(kind, message)| fail(kind, message))?;
     let format = map_file_type(tagged.file_type()).ok_or_else(|| {
         fail(
             FileErrorKind::Unsupported,
@@ -74,6 +84,52 @@ pub fn read_all(files: &[ScannedFile]) -> MetadataResult {
         (&a.rel_path, &a.path, &a.message).cmp(&(&b.rel_path, &b.path, &b.message))
     });
     MetadataResult { tracks, errors }
+}
+
+/// Durations above this come from corrupt headers, not real audio.
+const MAX_PLAUSIBLE_DURATION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+thread_local! {
+    /// Set while this thread runs a guarded lofty call; the panic hook stays quiet then.
+    static IN_GUARDED_READ: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Install (once per process) a panic hook that suppresses the default message and
+/// backtrace for panics inside [`guarded_probe_and_read`] and delegates every other
+/// panic to the previously installed hook. The flag is thread-local and the panic
+/// unwinds on the thread that raised it, so this is correct under rayon.
+fn install_quiet_panic_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !IN_GUARDED_READ.with(Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+}
+
+/// [`probe_and_read`] with any parser panic turned into a `Corrupt` error.
+fn guarded_probe_and_read(path: &std::path::Path) -> Result<TaggedFile, (FileErrorKind, String)> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            IN_GUARDED_READ.with(|f| f.set(false));
+        }
+    }
+
+    install_quiet_panic_hook();
+    IN_GUARDED_READ.with(|f| f.set(true));
+    let _reset = Reset;
+    catch_unwind(AssertUnwindSafe(|| probe_and_read(path))).unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic payload");
+        Err((FileErrorKind::Corrupt, format!("parser panicked: {detail}")))
+    })
 }
 
 /// Probe (content first, extension as fallback) and parse with cover art disabled.
@@ -175,12 +231,13 @@ fn map_tag_type(tt: TagType) -> Option<TagKind> {
     })
 }
 
-/// Tags in lookup order: the primary tag first, then the others in file order.
+/// Tags in lookup order: the primary tag first, then the other rich tags in file
+/// order, then ID3v1 (lossy: Latin-1 and 30-character fields).
 fn ordered_tags(tagged: &TaggedFile) -> Vec<&Tag> {
     let primary = tagged.primary_tag_type();
     let mut tags: Vec<&Tag> = tagged.tags().iter().collect();
-    // Stable sort keeps file order among the non-primary tags.
-    tags.sort_by_key(|t| t.tag_type() != primary);
+    // Stable sort keeps file order within each rank.
+    tags.sort_by_key(|t| (t.tag_type() != primary, t.tag_type() == TagType::Id3v1));
     tags
 }
 
@@ -217,8 +274,10 @@ fn build_track(file: &ScannedFile, format: AudioFormat, tagged: &TaggedFile) -> 
     tag_types.sort();
     tag_types.dedup();
 
-    let duration_ms = u64::try_from(tagged.properties().duration().as_millis())
-        .ok()
+    let duration = tagged.properties().duration();
+    let duration_ms = (duration <= MAX_PLAUSIBLE_DURATION)
+        .then(|| u64::try_from(duration.as_millis()).ok())
+        .flatten()
         .filter(|&ms| ms > 0);
 
     TrackInfo {
@@ -253,16 +312,18 @@ fn first_text(tags: &[&Tag], key: ItemKey) -> Option<String> {
 }
 
 /// Number and total for track or disc. Accepts `3`, ` 03 `, and `3/12` in the
-/// number field (the total part is used when no separate total is stored).
+/// number field. The number is the first valid one across tags; the total is the
+/// first separate total field, else the first slash total from any number field
+/// (independent of which tag supplied the number, so `0/12` keeps its 12).
 /// `0` and unparsable values are `None`.
 fn number_pair(tags: &[&Tag], num_key: ItemKey, total_key: ItemKey) -> (Option<u32>, Option<u32>) {
     let mut number = None;
     let mut slash_total = None;
     for value in tags.iter().filter_map(|t| t.get_string(num_key)) {
         let (n, t) = split_number(value);
-        if let Some(n) = n {
-            number = Some(n);
-            slash_total = t;
+        number = number.or(n);
+        slash_total = slash_total.or(t);
+        if number.is_some() && slash_total.is_some() {
             break;
         }
     }
@@ -349,6 +410,27 @@ mod tests {
         assert_eq!(parse_flag("false"), Some(false));
         assert_eq!(parse_flag(""), None);
         assert_eq!(parse_flag("maybe"), None);
+    }
+
+    #[test]
+    fn slash_total_survives_when_number_comes_from_a_later_tag() {
+        let mut primary = Tag::new(TagType::VorbisComments);
+        primary.insert_text(ItemKey::TrackNumber, "0/12".to_owned());
+        let mut v1 = Tag::new(TagType::Id3v1);
+        v1.insert_text(ItemKey::TrackNumber, "5".to_owned());
+        let tags = [&primary, &v1];
+        assert_eq!(
+            number_pair(&tags, ItemKey::TrackNumber, ItemKey::TrackTotal),
+            (Some(5), Some(12))
+        );
+
+        // A separate total field still wins over a slash total.
+        primary.insert_text(ItemKey::TrackTotal, "10".to_owned());
+        let tags = [&primary, &v1];
+        assert_eq!(
+            number_pair(&tags, ItemKey::TrackNumber, ItemKey::TrackTotal),
+            (Some(5), Some(10))
+        );
     }
 
     #[test]
