@@ -213,10 +213,12 @@ WantedBy=timers.target
 
 Then `systemctl enable --now liner-scan.timer`. Notes:
 
-- **`--fail-on never` is required here.** Without it, any issue makes the
-  service exit 1, so the unit (and any monitoring of the timer) shows a failure
+- **`--fail-on never` is required here.** Without it, any error-severity issue
+  or unreadable file makes the service exit 1, so the unit (and any monitoring of the timer) shows a failure
   although the scan worked. A real failure (unreadable root, unwritable output)
   still exits 2.
+- `ProtectHome=yes` hides `/home`, `/root` and `/run/user`; if the library
+  lives there, use `ProtectHome=read-only` instead.
 - Do not use `DynamicUser=yes`: systemd then keeps the state directory under
   `/var/lib/private` (mode 0700), so no other service can read the report.
 - `--config /dev/null` keeps the run independent of any user config. The
