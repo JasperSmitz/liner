@@ -25,9 +25,23 @@ need a stable, documented, versioned format.
   `kind`. The `severity` and `scope` value sets are closed within a major version. `message` texts are for humans and are not contractual; `code`,
   `severity`, `scope`, `album_id`, `paths` and documented `details` keys are.
 - Top level: `schema_version`, `tool {name, version}`, `generated_at` (RFC 3339
-  UTC), `root` (absolute), `summary`, `albums[]`, `issues[]`, `errors[]`. Optional
-  values are always present as `null` (never omitted), so consumers can rely on
-  key presence.
+  UTC, schema `format: date-time`), `root` (absolute), `options {min_severity,
+  follow_symlinks, include_hidden}`, `summary`, `albums[]`, `issues[]`,
+  `errors[]`. Optional values are always present as `null` (never omitted), so
+  consumers can rely on key presence. The schema states this: **every property of
+  every object is in `required`** (a schemars transform,
+  `model::all_fields_required`, enforces it for all report types).
+- `options` records how the report was produced, so a consumer can tell a report
+  filtered by `--min-severity` from a clean library: `options.min_severity` is the
+  filter applied to `issues[]`, and `summary.issues_hidden` counts the issues it
+  removed (they are not in `issues_by_severity` / `issues_by_code`).
+- **Open enums in the schema.** `format` (`AudioFormat`), `tag_types` (`TagKind`)
+  and error `kind` (`FileErrorKind`) are encoded as `anyOf: [<known values>,
+  {type: string}]` (transform `model::open_enum`), so a 1.x report with a newer
+  value still validates against the v1 schema; in Rust they stay closed enums.
+  `severity` and `scope` are closed `enum`s. `issues[].details` is an open object
+  in the schema; its keys per code are documented (and contractual) in
+  `docs/RULES.md`, as the schema description says.
 - **Determinism**: all arrays sorted (see `report.rs` docs), maps are
   `BTreeMap`, pretty-printed with a trailing newline. Same input + same
   `generated_at` ⇒ identical bytes, so reports are diffable.
@@ -38,6 +52,11 @@ need a stable, documented, versioned format.
   clean.
 - Severity of each code is fixed per schema major; changing it is a minor change
   (consumers must not hard-code severities), documented in the changelog.
+
+## Amendments
+- M3 review (pre-release, so fixed in place with `SCHEMA_VERSION` still `1.0.0`):
+  all keys `required`, open enums as above, `generated_at` format, `options` and
+  `summary.issues_hidden` added.
 
 ## Consequences
 - Every report type change is a visible diff in `schema/` and needs a deliberate

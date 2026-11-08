@@ -17,8 +17,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::group::{AlbumUnit, GroupedTrack};
-use crate::model::{AudioFormat, FileError, FileErrorKind, Issue, Severity, TagKind, TrackInfo};
-use crate::scan::ScanResult;
+use crate::model::{
+    AudioFormat, FileError, FileErrorKind, Issue, Severity, TagKind, TrackInfo, all_fields_required,
+};
+use crate::scan::{ScanOptions, ScanResult};
 
 /// Version of the JSON report schema (semver, independent of the crate version).
 pub const SCHEMA_VERSION: &str = "1.0.0";
@@ -27,16 +29,20 @@ pub const SCHEMA_VERSION: &str = "1.0.0";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(
     title = "Liner report",
-    description = "Metadata lint report produced by `liner scan --format json`. Consumers must ignore unknown fields and tolerate unknown enum values in `code`."
+    description = "Metadata lint report produced by `liner scan --format json`. Every key is always present; optional values are null. Consumers must check the major `schema_version`, ignore unknown fields, and tolerate unknown issue `code`s and unknown `format`, `tag_types` and error `kind` values. The keys of `issues[].details` for each code are documented (and contractual) in docs/RULES.md.",
+    transform = all_fields_required
 )]
 pub struct Report {
     /// Semver of this schema, e.g. "1.0.0". Consumers should check the major version.
     pub schema_version: String,
     pub tool: ToolInfo,
     /// RFC 3339 UTC timestamp, e.g. "2026-11-08T10:00:00Z".
+    #[schemars(extend("format" = "date-time"))]
     pub generated_at: String,
     /// Absolute path of the scanned library root (lossy UTF-8).
     pub root: String,
+    /// Scan and filter options that shaped this report.
+    pub options: ReportOptions,
     pub summary: Summary,
     pub albums: Vec<AlbumEntry>,
     pub issues: Vec<Issue>,
@@ -44,6 +50,7 @@ pub struct Report {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct ToolInfo {
     /// Always "liner".
     pub name: String,
@@ -51,7 +58,22 @@ pub struct ToolInfo {
     pub version: String,
 }
 
+/// Scan and filter options in effect, so consumers can tell a filtered report from
+/// a clean library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
+pub struct ReportOptions {
+    /// Issues below this severity were removed from `issues` (`--min-severity`);
+    /// their number is `summary.issues_hidden`.
+    pub min_severity: Severity,
+    /// Symbolic links were followed while walking.
+    pub follow_symlinks: bool,
+    /// Hidden files and directories (names starting with '.') were scanned.
+    pub include_hidden: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct Summary {
     /// Regular files seen during the walk (audio + non-audio).
     pub files_scanned: u64,
@@ -65,9 +87,13 @@ pub struct Summary {
     pub issues_by_severity: SeverityCounts,
     /// Issue count per code; only codes with at least one issue appear.
     pub issues_by_code: BTreeMap<String, u64>,
+    /// Issues removed by `--min-severity` (`options.min_severity`); not included
+    /// in `issues_by_severity` or `issues_by_code`.
+    pub issues_hidden: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct SeverityCounts {
     pub error: u64,
     pub warning: u64,
@@ -76,6 +102,7 @@ pub struct SeverityCounts {
 
 /// One album unit (a directory, with disc sub-folders merged).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct AlbumEntry {
     /// Stable id: root-relative directory path, "/"-separated; "." for the root.
     pub id: String,
@@ -91,6 +118,7 @@ pub struct AlbumEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct DiscEntry {
     /// Effective disc number; null when it cannot be determined (multi-disc album
     /// with untagged files outside disc folders).
@@ -101,6 +129,7 @@ pub struct DiscEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct TrackEntry {
     /// Root-relative file path, "/"-separated.
     pub path: String,
@@ -123,6 +152,7 @@ pub struct TrackEntry {
 
 /// A file that could not be walked or read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct FileErrorEntry {
     /// Root-relative path, "/"-separated.
     pub path: String,
@@ -137,6 +167,8 @@ pub struct ReportInput<'a> {
     /// Absolute library root.
     pub root: &'a Path,
     pub generated_at: jiff::Timestamp,
+    /// Options the scan ran with (recorded in `options`).
+    pub scan_options: ScanOptions,
     pub scan: &'a ScanResult,
     /// Read failures from the metadata stage (scan errors come from `scan.errors`).
     pub read_errors: &'a [FileError],
@@ -177,6 +209,11 @@ pub fn build_report(input: ReportInput<'_>) -> Report {
         },
         generated_at: input.generated_at.to_string(),
         root: input.root.to_string_lossy().into_owned(),
+        options: ReportOptions {
+            min_severity: Severity::Info,
+            follow_symlinks: input.scan_options.follow_symlinks,
+            include_hidden: input.scan_options.include_hidden,
+        },
         summary: Summary {
             files_scanned: input.scan.files_scanned(),
             audio_files: input.scan.audio_files.len() as u64,
@@ -184,6 +221,7 @@ pub fn build_report(input: ReportInput<'_>) -> Report {
             albums: 0,
             issues_by_severity: SeverityCounts::default(),
             issues_by_code: BTreeMap::new(),
+            issues_hidden: 0,
         },
         albums,
         issues,
@@ -276,14 +314,18 @@ impl Report {
         self.issues.iter().map(|i| i.severity).max()
     }
 
-    /// Drop issues below `min` and recompute the summary.
+    /// Drop issues below `min`, record the filter in `options.min_severity` and
+    /// `summary.issues_hidden`, and recompute the summary.
     pub fn retain_min_severity(&mut self, min: Severity) {
+        let before = self.issues.len();
         self.issues.retain(|i| i.severity >= min);
+        self.summary.issues_hidden += (before - self.issues.len()) as u64;
+        self.options.min_severity = self.options.min_severity.max(min);
         self.recompute_summary();
     }
 
     /// Recompute the derived counters in `summary` from the lists
-    /// (`files_scanned` and `audio_files` are left untouched).
+    /// (`files_scanned`, `audio_files` and `issues_hidden` are left untouched).
     pub fn recompute_summary(&mut self) {
         let mut by_severity = SeverityCounts::default();
         let mut by_code = BTreeMap::new();

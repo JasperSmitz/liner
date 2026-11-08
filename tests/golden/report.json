@@ -6,6 +6,11 @@
   },
   "generated_at": "2026-11-08T10:00:00Z",
   "root": "/library",
+  "options": {
+    "min_severity": "info",
+    "follow_symlinks": false,
+    "include_hidden": false
+  },
   "summary": {
     "files_scanned": 11,
     "audio_files": 8,
@@ -24,7 +29,8 @@
       "missing-title": 1,
       "missing-track-number": 1,
       "split-album": 1
-    }
+    },
+    "issues_hidden": 0
   },
   "albums": [
     {

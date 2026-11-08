@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
+#[schemars(transform = open_enum)]
 pub enum AudioFormat {
     Flac,
     Mp3,
@@ -37,6 +38,7 @@ pub enum AudioFormat {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
+#[schemars(transform = open_enum)]
 pub enum TagKind {
     Id3v1,
     Id3v2,
@@ -110,6 +112,7 @@ impl TrackInfo {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
+#[schemars(transform = open_enum)]
 pub enum FileErrorKind {
     /// Directory walk failed for this entry (permission denied, symlink loop, ...).
     Walk,
@@ -177,6 +180,7 @@ pub enum Scope {
 
 /// One finding produced by a lint rule. Serialised verbatim into `issues[]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = all_fields_required)]
 pub struct Issue {
     /// Stable kebab-case rule code, see `docs/RULES.md` and `rules::codes`.
     pub code: String,
@@ -185,12 +189,10 @@ pub struct Issue {
     /// Human-readable, single line. Not part of the stable contract (wording may change).
     pub message: String,
     /// Album id (root-relative directory) for file/album issues; null for library scope.
-    #[serde(default)]
     pub album_id: Option<String>,
     /// Affected files, root-relative, sorted.
     pub paths: Vec<String>,
     /// Rule-specific structured data; keys per rule are documented in `docs/RULES.md`.
-    #[serde(default)]
     pub details: BTreeMap<String, serde_json::Value>,
 }
 
@@ -206,6 +208,52 @@ impl Issue {
             self.message.as_str(),
         )
     }
+}
+
+/// Schema transform for report structs: every property is `required`.
+///
+/// The report never omits a key (optional values are serialised as `null`, see
+/// ADR 0003), but schemars leaves `Option` fields out of `required` by default.
+pub(crate) fn all_fields_required(schema: &mut schemars::Schema) {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return;
+    };
+    let mut required: Vec<serde_json::Value> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for key in props.keys() {
+        let key = serde_json::Value::from(key.as_str());
+        if !required.contains(&key) {
+            required.push(key);
+        }
+    }
+    schema.insert("required".to_owned(), required.into());
+}
+
+/// Schema transform for enums whose value set is open within a schema major
+/// (`format`, `tag_types`, error `kind`; ADR 0003): the known values, or any other
+/// string added by a later 1.x minor version.
+pub(crate) fn open_enum(schema: &mut schemars::Schema) {
+    let mut known = std::mem::take(schema);
+    let description = known.remove("description");
+    let mut open = serde_json::Map::new();
+    if let Some(d) = description {
+        let d = d.as_str().unwrap_or_default();
+        open.insert(
+            "description".to_owned(),
+            format!("{d} Open set: consumers must tolerate values not listed here.").into(),
+        );
+    }
+    open.insert(
+        "anyOf".to_owned(),
+        serde_json::json!([
+            known,
+            {"type": "string", "description": "A value added in a later 1.x minor version."}
+        ]),
+    );
+    *schema = schemars::Schema::from(open);
 }
 
 /// Root-relative, `/`-separated, lossy-UTF-8 representation of `path`.

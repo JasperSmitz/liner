@@ -292,6 +292,7 @@ fn build(i: &Inputs) -> Report {
     let mut report = build_report(ReportInput {
         root: Path::new(ROOT),
         generated_at: timestamp(),
+        scan_options: Default::default(),
         scan: &i.scan,
         read_errors: &i.read_errors,
         albums: &i.albums,
@@ -447,6 +448,12 @@ fn summary_counts_and_issue_order() {
     assert!(!r.summary.issues_by_code.contains_key(codes::MISSING_TITLE));
     // errors[] is not affected by --min-severity.
     assert_eq!(r.errors.len(), 2);
+    // The filter is recorded.
+    assert_eq!(r.summary.issues_hidden, 2);
+    assert_eq!(r.options.min_severity, Severity::Warning);
+    r.retain_min_severity(Severity::Error);
+    assert_eq!(r.summary.issues_hidden, 6);
+    assert_eq!(r.options.min_severity, Severity::Error);
 }
 
 #[test]
@@ -462,6 +469,46 @@ fn json_keeps_null_optionals() {
         .find(|i| i["code"] == codes::SPLIT_ALBUM)
         .unwrap();
     assert!(split["album_id"].is_null());
+    assert!(split.as_object().unwrap().contains_key("details"));
+    let track = &v["albums"][0]["discs"][0]["tracks"][0];
+    for key in ["title", "track_no", "duration_ms", "genre"] {
+        assert!(track.as_object().unwrap().contains_key(key), "{key}");
+    }
+}
+
+/// Every object property in the schema is `required` (ADR 0003: keys are always
+/// present), and the open enums accept unknown strings.
+#[test]
+fn schema_requires_every_key_and_keeps_enums_open() {
+    let schema = liner::report::json_schema();
+    let mut objects = vec![&schema];
+    objects.extend(schema["$defs"].as_object().unwrap().values());
+    for obj in objects {
+        let Some(props) = obj.get("properties").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let required = obj["required"].as_array().unwrap();
+        for key in props.keys() {
+            assert!(
+                required.contains(&key.as_str().into()),
+                "{key} not required"
+            );
+        }
+    }
+    for open in ["AudioFormat", "TagKind", "FileErrorKind"] {
+        let any_of = schema["$defs"][open]["anyOf"].as_array().unwrap();
+        assert!(
+            any_of.contains(&json!({
+                "type": "string",
+                "description": "A value added in a later 1.x minor version."
+            })),
+            "{open}"
+        );
+    }
+    for closed in ["Severity", "Scope"] {
+        assert!(schema["$defs"][closed].get("anyOf").is_none(), "{closed}");
+    }
+    assert_eq!(schema["properties"]["generated_at"]["format"], "date-time");
 }
 
 #[test]
@@ -559,4 +606,33 @@ fn human_output_clean_library() {
     let text = human(&build(&i), false);
     assert!(text.starts_with("No issues found.\n"), "{text}");
     assert_eq!(text.lines().count(), 2);
+}
+
+#[test]
+fn human_output_mentions_hidden_issues() {
+    let mut i = inputs();
+    i.scan.errors.clear();
+    i.read_errors.clear();
+    i.issues.retain(|x| x.severity != Severity::Error);
+    let mut r = build(&i);
+    r.retain_min_severity(Severity::Error);
+    let text = human(&r, false);
+    assert!(
+        text.starts_with("No issues at or above error (6 lower-severity issues hidden).\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("0 errors, 0 warnings, 0 info (6 below error hidden)"),
+        "{text}"
+    );
+
+    // With issues left, the summary line still reports the hidden ones.
+    let mut r = build(&inputs());
+    r.retain_min_severity(Severity::Warning);
+    let text = human(&r, false);
+    assert!(!text.contains("No issues"), "{text}");
+    assert!(
+        text.contains("1 errors, 4 warnings, 0 info (2 below warning hidden)"),
+        "{text}"
+    );
 }

@@ -89,7 +89,8 @@ Acceptance:
   info issues but `--fail-on info` still exits 1.
 - Config precedence tests (CLI > file > default), explicit missing config → 2,
   missing default config ignored, unknown key → 2.
-- `--output report.flac` refused; `--output dir/` refused.
+- `--output report.flac` refused; `--output dir/` refused; `--output` inside the
+  library, through a symlink or onto a hard link refused.
 - `liner scan … | head` (broken pipe) exits quietly, without an error message.
 - Error messages: `LinerError`/`ConfigError` Display strings never repeat their
   `#[source]` (main prints the chain with `{:#}`).

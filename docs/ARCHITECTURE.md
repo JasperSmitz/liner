@@ -96,10 +96,16 @@ liner schema    # print the report JSON Schema
   (`--config FILE`, else `$XDG_CONFIG_HOME/liner/config.toml`, else
   `~/.config/liner/config.toml`). An explicit `--config` must exist; a missing
   default config is ignored. Precedence: CLI > config > built-in default.
-  Unknown config keys are an error.
+  Unknown config keys are an error. A relative `library_path` in the config is
+  resolved against the config file's directory (not the current directory); `~`
+  is not expanded. Boolean settings can only be switched *on* from the CLI.
 - `--fail-on` (default `error`) is evaluated on **all** issues, before
   `--min-severity` (default `info`) filters the issues in the output. The report's
-  `summary` describes the issues that are in the report.
+  `summary` describes the issues that are in the report; the filter is recorded in
+  `options.min_severity` and the number of removed issues in
+  `summary.issues_hidden`. Human output says so too ("No issues at or above error
+  (3 lower-severity issues hidden)", and "(N below <sev> hidden)" on the summary
+  line), so an exit code 1 is never unexplained.
 - Exit codes: `0` no issue at/above `--fail-on` and no unreadable file; `1` such
   issues found, or `errors[]` is non-empty; `2` runtime or usage error (clap's own
   usage errors also exit 2). Entries in `errors[]` (walk/io/unsupported/corrupt)
@@ -114,6 +120,12 @@ liner schema    # print the report JSON Schema
   `--output` file only with `--color always`.
 - A closed stdout (`liner scan | head`) ends output quietly; the exit code is still
   computed from the report.
+- `--output FILE`: cheap checks run before the scan (no audio extension in any
+  case, not an existing non-regular file or symlink, parent directory exists, and
+  the canonicalised parent is **not inside the canonicalised library root**). The
+  report is rendered to memory and the file is opened only after the scan and
+  rendering succeeded, so a failed run never empties an existing file (see
+  "Read-only guarantees").
 
 ## Error handling
 
@@ -137,8 +149,13 @@ liner schema    # print the report JSON Schema
    `File::create[_new]` and `OpenOptions::new`. CI runs
    `cargo clippy --all-targets -- -D warnings`, so a violation fails the build.
 3. The only exemption in non-test code is `render::create_output_file` (the
-   user-requested report). It refuses paths with an audio extension and existing
-   non-regular files, so a mistyped `--output` cannot clobber music.
+   user-requested report). It refuses paths with an audio extension, opens with
+   `O_WRONLY|O_CREAT|O_NOFOLLOW|O_NONBLOCK` (no `O_TRUNC`, mode 0644), checks the
+   opened handle (`fstat`: must be a regular file with `nlink == 1`, so neither a
+   symlink nor a hard link to an audio file can be written through), and only then
+   truncates. `render::check_output_path` additionally refuses any `--output`
+   inside the library root, before the scan. A mistyped `--output` cannot clobber
+   music or create files in the library.
 4. Test code that writes tags (`tests/common/mod.rs`) opts out explicitly and only
    writes inside its own `TempDir`. Tests never read the developer's real config
    (`XDG_CONFIG_HOME`/`HOME` are overridden) and never touch `/storage/music`.
