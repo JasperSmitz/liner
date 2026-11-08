@@ -155,7 +155,6 @@ fn no_library_path_exits_2() {
 }
 
 #[test]
-#[ignore = "needs the M1 scan root check (scan::scan is a placeholder on this branch)"]
 fn bad_root_exits_2() {
     liner()
         .args(["scan", "/nonexistent-liner-test-library"])
