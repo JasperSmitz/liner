@@ -978,3 +978,83 @@ fn min_severity_hides_info_but_fail_on_info_still_fails() {
         "{out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Grouping edge cases (final review): partitions by album artist, singles without
+// an album tag, directories differing only in invalid UTF-8 bytes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_title_by_two_album_artists_and_untagged_singles_exit_zero() {
+    let lib = Library::new();
+    for artist in ["Artist A", "Artist B"] {
+        for n in 1..=3 {
+            lib.add(
+                &format!("Misc/{artist} {n:02}.flac"),
+                Fixture::Flac,
+                &base("Greatest Hits", artist)
+                    .title(&format!("{artist} song {n}"))
+                    .track(n)
+                    .track_total(3),
+            );
+        }
+    }
+    for (name, fixture) in [
+        ("a", Fixture::Flac),
+        ("b", Fixture::Mp3),
+        ("c", Fixture::Flac),
+    ] {
+        lib.add(
+            &format!("Singles/{name}.{}", fixture.extension()),
+            fixture,
+            &Tags::new()
+                .artist(&format!("Artist {name}"))
+                .title(&format!("Song {name}"))
+                .track(1)
+                .track_total(1),
+        );
+    }
+    let (code, v) = scan_json(&lib, &[]);
+    assert_eq!(code, 0, "{:#}", v["issues"]);
+    let by_album = codes_by_album(&v);
+    assert_eq!(
+        by_album["Misc"],
+        ["mixed-album-directory".to_owned()].into(),
+        "{:#}",
+        v["issues"]
+    );
+    let singles = &by_album["Singles"];
+    assert!(singles.contains("missing-album"), "{singles:?}");
+    for code in ["duplicate-track-position", "likely-missing-disc-numbers"] {
+        assert!(!singles.contains(code), "{singles:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn directories_differing_only_in_invalid_bytes_are_separate_albums() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let lib = Library::new();
+    for dir in [&b"Album\xfe"[..], &b"Album\xff"[..]] {
+        lib.add_at(
+            std::path::Path::new(OsStr::from_bytes(dir)).join("02.mp3"),
+            Fixture::Mp3,
+            &base("Album", "Artist")
+                .title("Two")
+                .track(2)
+                .track_total(10),
+        );
+    }
+    let (code, v) = scan_json(&lib, &[]);
+    assert_eq!(code, 0, "{:#}", v["issues"]);
+    assert!(issues(&v, "duplicate-track-position").is_empty());
+    let ids: Vec<&str> = v["albums"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["Album\u{FFFD}", "Album\u{FFFD} #2"]);
+    assert_eq!(album(&v, "Album\u{FFFD} #2")["track_count"], json!(1));
+}

@@ -3,6 +3,7 @@
 //! Every rule here runs per album partition ([`AlbumUnit::partitions`]), matching
 //! the per-partition multi-disc decision and effective-disc fallback made in
 //! `group`: one album's disc tags never affect another album in the same directory.
+//! A partition without any album tag is skipped entirely (it is not an album).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +20,11 @@ use super::util::{
 
 pub(super) fn check(unit: &AlbumUnit, out: &mut Vec<Issue>) {
     for part in unit.partitions() {
+        // Tracks without any album tag (loose singles) are not a positional album:
+        // their track and disc numbers are not comparable with each other.
+        if part.is_untitled() {
+            continue;
+        }
         missing_disc_number(unit, &part, out);
         disc_folder_mismatch(unit, &part, out);
         disc_number_gap(unit, &part, out);

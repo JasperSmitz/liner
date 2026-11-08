@@ -51,9 +51,10 @@ pub(super) fn paths<'a>(tracks: impl IntoIterator<Item = &'a GroupedTrack>) -> V
 
 /// Message prefixing for album partitions ([`AlbumPartition`]).
 ///
-/// In a mixed unit (2+ distinct normalised album titles, reported by
-/// `mixed-album-directory`) the per-album rules run per partition, and their
-/// messages name the album; in every other unit there is one unlabelled partition.
+/// In a mixed unit (2+ distinct partition keys: normalised album titles, plus album
+/// artists when the unit has several; reported by `mixed-album-directory`) the
+/// per-album rules run per partition, and their messages name the album; in every
+/// other unit there is one unlabelled partition.
 pub(super) trait PartitionMessage {
     /// Prefix `message` with the album label, if any.
     fn message(&self, message: String) -> String;

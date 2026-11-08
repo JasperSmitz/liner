@@ -1303,22 +1303,39 @@ fn split_album_keys_come_from_each_partitions_own_consensus() {
 
 #[test]
 fn split_album_needs_an_unambiguous_artist_in_the_partition() {
-    // Two album artists and two track artists in one partition: no key.
-    let ambiguous = vec![tagged("P", 1, "Album", "X"), tagged("P", 2, "Album", "Y")];
+    let no_album_artist = |t: TrackInfo| TrackInfo {
+        album_artist: None,
+        ..t
+    };
     let clean_y: Vec<TrackInfo> = (1..=2).map(|n| tagged("Q", n, "Album", "Y")).collect();
+
+    // No album artist and two track artists in one partition: no key.
+    let ambiguous = vec![
+        no_album_artist(tagged("P", 1, "Album", "X")),
+        no_album_artist(tagged("P", 2, "Album", "Y")),
+    ];
     let issues = run(concat(vec![ambiguous, clean_y.clone()]));
     assert!(only(&issues, codes::SPLIT_ALBUM).is_empty(), "{issues:#?}");
 
-    // Two album artists but one shared track artist: the track artist is the key.
-    let shared = vec![
-        TrackInfo {
-            artist: Some("Y".into()),
-            ..tagged("P", 1, "Album", "X")
-        },
-        tagged("P", 2, "Album", "Y"),
-    ];
-    let i = one(&run(concat(vec![shared, clean_y])), codes::SPLIT_ALBUM);
+    // No album artist but one shared track artist: the track artist is the key.
+    let shared: Vec<TrackInfo> = (1..=2)
+        .map(|n| no_album_artist(tagged("P", n, "Album", "Y")))
+        .collect();
+    let i = one(
+        &run(concat(vec![shared, clean_y.clone()])),
+        codes::SPLIT_ALBUM,
+    );
     assert_eq!(i.details["album_ids"], json!(["P", "Q"]));
+
+    // Two album artists in one directory are two partitions (ADR 0002), so the
+    // 'Album' by Y in P matches Q, listing only that partition's file.
+    let two_artists = vec![tagged("P", 1, "Album", "X"), tagged("P", 2, "Album", "Y")];
+    let i = one(&run(concat(vec![two_artists, clean_y])), codes::SPLIT_ALBUM);
+    assert_eq!(i.details["album_ids"], json!(["P", "Q"]));
+    assert_eq!(
+        i.paths,
+        vec!["P/Album-02.flac", "Q/Album-01.flac", "Q/Album-02.flac"]
+    );
 }
 
 #[test]
@@ -1480,4 +1497,99 @@ fn u32_max_numbers_do_not_panic() {
     run(tracks.clone());
     // And with no disc numbers at all.
     run(no_disc_tags(tracks));
+}
+
+// ---------------------------------------------------------------------------
+// Album partitions by album artist; tracks without an album (final review F1)
+
+fn errors(issues: &[Issue]) -> Vec<&Issue> {
+    issues
+        .iter()
+        .filter(|i| i.severity == liner::model::Severity::Error)
+        .collect()
+}
+
+#[test]
+fn same_title_by_two_album_artists_in_one_folder_is_mixed_only() {
+    let by = |artist: &str, n: u32| TrackInfo {
+        album: Some("Greatest Hits".into()),
+        artist: Some(artist.into()),
+        album_artist: Some(artist.into()),
+        title: Some(format!("{artist} {n}")),
+        ..clean(&format!("Misc/{artist}-{n:02}.flac"), n, 3)
+    };
+    let tracks: Vec<TrackInfo> = ["Artist A", "Artist B"]
+        .into_iter()
+        .flat_map(|a| (1..=3).map(move |n| by(a, n)))
+        .collect();
+    let issues = run(tracks);
+    assert_codes(&issues, &[codes::MIXED_ALBUM_DIRECTORY]);
+    assert!(errors(&issues).is_empty(), "{issues:#?}");
+    let mixed = one(&issues, codes::MIXED_ALBUM_DIRECTORY);
+    assert_eq!(mixed.details["field"], json!("album_artist"));
+}
+
+#[test]
+fn singles_folder_without_album_tags_has_no_position_issues() {
+    let single = |name: &str| TrackInfo {
+        album: None,
+        album_artist: None,
+        artist: Some(format!("Artist {name}")),
+        title: Some(format!("Song {name}")),
+        ..clean(&format!("Singles/{name}.flac"), 1, 1)
+    };
+    let issues = run(vec![single("a"), single("b"), single("c")]);
+    assert!(errors(&issues).is_empty(), "{issues:#?}");
+    for code in [
+        codes::DUPLICATE_TRACK_POSITION,
+        codes::LIKELY_MISSING_DISC_NUMBERS,
+        codes::TRACK_NUMBER_GAP,
+        codes::INCONSISTENT_TRACK_TOTAL,
+    ] {
+        assert!(only(&issues, code).is_empty(), "{code}: {issues:#?}");
+    }
+    // File-level rules still apply.
+    assert_eq!(only(&issues, codes::MISSING_ALBUM).len(), 3);
+
+    // Untagged tracks next to two albums: their numbers are not compared either.
+    let mut tracks = vec![single("a"), single("b")];
+    tracks.extend(album("Singles", 2).into_iter().map(|t| TrackInfo {
+        album: Some("One".into()),
+        ..t
+    }));
+    tracks.extend(album("Singles", 2).into_iter().map(|t| TrackInfo {
+        album: Some("Two".into()),
+        rel_path: t.rel_path.replace(".flac", "-two.flac"),
+        ..t
+    }));
+    let issues = run(tracks);
+    assert!(errors(&issues).is_empty(), "{issues:#?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn directories_differing_only_in_invalid_bytes_do_not_share_positions() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let track = |dir: &[u8]| {
+        let mut rel = dir.to_vec();
+        rel.extend_from_slice(b"/02.flac");
+        TrackInfo {
+            path: std::path::Path::new("/lib").join(OsStr::from_bytes(&rel)),
+            rel_path: String::from_utf8_lossy(&rel).into_owned(),
+            ..clean("unused/02.flac", 2, 10)
+        }
+    };
+    let units = group_tracks(vec![track(b"Album\xfe"), track(b"Album\xff")]);
+    assert_eq!(units.len(), 2);
+    let issues = run_all(&units);
+    assert!(
+        only(&issues, codes::DUPLICATE_TRACK_POSITION).is_empty(),
+        "{issues:#?}"
+    );
+    let ids: BTreeSet<&str> = issues
+        .iter()
+        .filter_map(|i| i.album_id.as_deref())
+        .collect();
+    assert_eq!(ids, ["Album\u{FFFD}", "Album\u{FFFD} #2"].into());
 }

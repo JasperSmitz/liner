@@ -53,8 +53,9 @@ PATH ─► scan::scan ──► ScanResult { audio_files, other_files, errors }
       metadata::read_all (rayon) ──► MetadataResult { tracks: Vec<TrackInfo>, errors }
             │
             ▼
-      group::group_tracks ──► Vec<AlbumUnit> (directory units, disc folders merged,
-            │                                  album partitions, effective disc per track)
+      group::group_tracks ──► Vec<AlbumUnit> (directory units by real path, disc
+            │                                  folders merged, album partitions keyed
+            │                                  by album (+ album artist), effective disc)
             ▼
       rules::run_all ──► Vec<Issue> (sorted)
             │
@@ -73,7 +74,9 @@ Key contracts (details in module docs):
 
 - **Paths.** Files are opened through `path` (root joined with the walked entry).
   Everything user-visible uses `rel_path`: root-relative, `/`-separated, lossy
-  UTF-8 (`model::rel_path_string`). The root album id is `"."`.
+  UTF-8 (`model::rel_path_string`). The root album id is `"."`. Grouping keys on
+  the real directory path (from `path`), never on the lossy string; album ids
+  that would collide after lossy conversion get ` #2`, ` #3`, ... (ADR 0002).
 - **Text values** keep their original spelling. Comparisons use
   `model::normalize_for_compare` (Unicode NFC, curly quotes folded to straight
   ones, trim, collapse whitespace, Unicode lowercase).

@@ -7,7 +7,10 @@ make players mis-order or merge tracks; **warning** = inconsistency that likely
 needs fixing; **info** = worth knowing, often intentional.
 
 Common definitions (see ADR 0002):
-- *unit*: album unit (directory, disc folders merged); `album_id` = its id.
+- *unit*: album unit (directory, disc folders merged); `album_id` = its id: the
+  root-relative directory path in lossy UTF-8, with ` #2`, ` #3`, ... appended when
+  distinct directories (names differing only in invalid UTF-8 bytes) would get the
+  same id (ADR 0002). Disc folder paths (`folder`) are disambiguated the same way.
 - *effective disc*: tag disc → folder disc hint → 1 if the track's album partition
   is single-disc → unknown.
 - *multi-disc* (per album partition): any disc tag > 1, disc total > 1 or disc
@@ -22,16 +25,25 @@ Common definitions (see ADR 0002):
 - *all tracks agree* (for totals and the shared artist): every track that has the
   value carries the same one, and at least one track has it; tracks without the
   value are ignored.
-- *album partition*: in a unit whose tracks carry 2+ distinct normalised album
-  titles (reported by `mixed-album-directory`), the rules marked "per album" below
-  run separately for each album title (tracks without an album tag form their own
-  partition) and their messages are prefixed with `Album '<title>': `. In every
-  other unit the whole unit is one partition. This keeps a flat folder of unrelated
-  albums or singles from also producing duplicate positions, gaps or artist issues
-  across albums. The multi-disc decision, the effective-disc fallback and the
+- *album partition*: tracks are keyed by (normalised album title, normalised
+  album artist), where the artist part counts only in a unit with 2+ distinct
+  normalised album artists (a track without an album artist then uses its track
+  artist). In a unit with 2+ distinct such keys that have an album title (reported
+  by `mixed-album-directory`), the rules marked "per album" below run separately
+  for each key (tracks without an album tag form one more partition) and their
+  messages are prefixed with `Album '<title>': `, or `Album '<title>' by
+  '<artist>': ` when keyed by artist. In every other unit the whole unit is one
+  partition. This keeps a flat folder of unrelated albums (even ones sharing a
+  generic title like "Greatest Hits") from also producing duplicate positions,
+  gaps or artist issues across albums, while a compilation with one album artist,
+  or none, stays one album.
+- *untitled partition*: a partition in which no track has an album tag (loose
+  singles). It is not an album: none of the rules in the numbering table run for
+  it, so a "Singles" folder whose files are all track 1 of 1 gets no
+  `duplicate-track-position`. File-scope rules still apply. The multi-disc decision, the effective-disc fallback and the
   split-album key are also computed per partition, so one album's disc tags never
   affect another album in the same directory. All album-scope rules in the
-  numbering table run per album; `mixed-album-directory` and
+  numbering table run per album (except for an untitled partition); `mixed-album-directory` and
   `inconsistent-tag-spelling` look at the whole unit.
 
 ## File scope
@@ -95,7 +107,7 @@ non-matching folder. Tracks without a track number are ignored by position rules
 False positives: `mixed-album-directory` for a deliberately flat "Singles" or
 "Misc" folder (a future config ignore-list could address it; not in scope now;
 thanks to album partitions such a folder gets only this issue, not duplicates or
-gaps across albums). Trade-off of partitions: an album whose discs carry different
+gaps across albums; singles without album tags get no position issues at all). Trade-off of partitions: an album whose discs carry different
 album titles (`Foo (Disc 1)`, `Foo (Disc 2)`) is reported as mixed, and its
 per-album rules then see each title separately;
 `missing-album-artist` for albums with featured artists in the artist tag

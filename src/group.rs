@@ -8,10 +8,23 @@
 //!   and its number becomes each of its tracks' `folder_disc`. Only one level is
 //!   merged (`A/CD1/x.flac` -> unit `A`; `A/CD1/Extra/x.flac` -> unit `A/CD1/Extra`).
 //!   A disc folder directly under the root merges into the root unit `"."`.
-//! - Album id = root-relative directory path of the unit (`"."` for the root).
-//! - Album partitions ([`AlbumUnit::partitions`]): if the unit's tracks carry 2+
-//!   distinct normalised album titles, each title is one partition (tracks without
-//!   an album tag form their own); otherwise the whole unit is one partition.
+//! - Units and disc folders are identified by the *real* directory path (the
+//!   parent of `TrackInfo::path`, relative to the root, as an `OsStr` path), never
+//!   by the lossy `rel_path` string, so directories whose names differ only in
+//!   invalid UTF-8 bytes stay separate.
+//! - Album id = root-relative directory path of the unit (`"."` for the root),
+//!   lossy UTF-8. When distinct units' lossy ids collide, the unit whose raw path
+//!   bytes sort first keeps the plain id and the others get ` #2`, ` #3`, ... in
+//!   raw-path-byte order (skipping any suffixed id that is already taken). Disc
+//!   folder paths (`disc_folder`) colliding within a unit are suffixed the same way.
+//! - Album partitions ([`AlbumUnit::partitions`]): each track's partition key is
+//!   (normalised album title, normalised album artist). The artist part is used
+//!   only when the unit has 2+ distinct normalised album artists; a track without
+//!   an album artist then uses its normalised track artist. If 2+ distinct keys
+//!   with an album title exist, each is one partition and tracks without an album
+//!   tag form one more partition; otherwise the whole unit is one partition.
+//!   A partition without any album title is not a positional album (rules skip
+//!   position, numbering and disc rules for it).
 //! - A partition is multi-disc if any of its tracks has `disc_no > 1`,
 //!   `disc_total > 1` or `folder_disc > 1`, its tracks come from 2+ distinct disc
 //!   folders, or some come from a disc folder and others lie loose in the parent.
@@ -23,6 +36,8 @@
 //! - Pure function of its input: no I/O.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 
 use crate::model::{TrackInfo, normalize_for_compare};
 
@@ -41,7 +56,9 @@ pub struct GroupedTrack {
 /// One album candidate: a directory (plus merged disc folders) of tracks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumUnit {
-    /// Root-relative directory path, `/`-separated; `"."` for the root. Stable report id.
+    /// Root-relative directory path, `/`-separated, lossy UTF-8; `"."` for the root.
+    /// Stable report id; suffixed ` #N` when distinct directories' lossy paths
+    /// collide (see module docs).
     pub id: String,
     /// Sorted, see module docs. Never empty.
     pub tracks: Vec<GroupedTrack>,
@@ -71,20 +88,32 @@ impl AlbumUnit {
     }
 
     /// The album partitions of this unit (see module docs). Never empty for a
-    /// non-empty unit; exactly one unless the tracks carry 2+ distinct normalised
-    /// album titles. Partitions are ordered by normalised album title, tracks without
-    /// an album tag first; tracks keep the unit's order.
+    /// non-empty unit; exactly one unless the tracks carry 2+ distinct partition
+    /// keys with an album title. Partitions are ordered by normalised (album title,
+    /// artist), tracks without an album tag first; tracks keep the unit's order.
     pub fn partitions(&self) -> Vec<AlbumPartition<'_>> {
-        let groups = partition_indices(self.tracks.iter().map(|t| &t.info));
+        let infos: Vec<&TrackInfo> = self.tracks.iter().map(|t| &t.info).collect();
+        let by_artist = keys_by_artist(&infos);
+        let groups = partition_indices(&infos);
         let mixed = groups.len() > 1;
         groups
             .into_iter()
             .map(|indices| {
                 let tracks: Vec<&GroupedTrack> = indices.iter().map(|&i| &self.tracks[i]).collect();
                 let title = most_common(tracks.iter().filter_map(|t| t.info.album.as_deref()));
-                let label = mixed.then(|| match &title {
-                    Some(album) => format!("Album '{album}'"),
-                    None => "Tracks without an album tag".to_owned(),
+                let artist = by_artist
+                    .then(|| {
+                        most_common(
+                            tracks
+                                .iter()
+                                .filter_map(|t| partition_artist(&t.info, true)),
+                        )
+                    })
+                    .flatten();
+                let label = mixed.then(|| match (&title, &artist) {
+                    (Some(album), Some(artist)) => format!("Album '{album}' by '{artist}'"),
+                    (Some(album), None) => format!("Album '{album}'"),
+                    (None, _) => "Tracks without an album tag".to_owned(),
                 });
                 let is_multi_disc = detect_multi_disc(tracks.iter().copied());
                 AlbumPartition {
@@ -99,13 +128,15 @@ impl AlbumUnit {
 }
 
 /// One album inside a unit: all of the unit's tracks, or (in a mixed unit) the
-/// tracks sharing one normalised album title. Multi-disc decision, effective-disc
+/// tracks sharing one partition key (normalised album title, plus the album artist
+/// when the unit has several; see module docs). Multi-disc decision, effective-disc
 /// fallback and the split-album key are computed per partition, so one album's tags
 /// never affect another album stored in the same directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumPartition<'a> {
-    /// Display name for messages (`Album 'X'`, or `Tracks without an album tag`);
-    /// `None` when the unit is a single partition.
+    /// Display name for messages (`Album 'X'`, `Album 'X' by 'Y'` when partitions
+    /// are keyed by artist, or `Tracks without an album tag`); `None` when the unit
+    /// is a single partition.
     pub label: Option<String>,
     /// Most common raw `album` value of these tracks (same tie-break as the unit).
     pub title: Option<String>,
@@ -116,6 +147,13 @@ pub struct AlbumPartition<'a> {
 }
 
 impl AlbumPartition<'_> {
+    /// `true` if no track of this partition has an album tag. Such tracks (loose
+    /// singles, untagged files) never form a positional album: position, numbering
+    /// and disc rules skip this partition.
+    pub fn is_untitled(&self) -> bool {
+        self.title.is_none()
+    }
+
     /// `true` if any track has a disc tag or a disc folder hint.
     pub fn has_disc_info(&self) -> bool {
         self.tracks
@@ -179,31 +217,63 @@ fn is_various_artists(normalized: &str) -> bool {
     matches!(normalized, "various artists" | "various" | "va")
 }
 
+/// `true` if partitions are keyed by artist as well: the tracks carry 2+ distinct
+/// normalised album artists.
+fn keys_by_artist(tracks: &[&TrackInfo]) -> bool {
+    let artists: BTreeSet<String> = tracks
+        .iter()
+        .filter_map(|t| t.album_artist.as_deref())
+        .map(normalize_for_compare)
+        .collect();
+    artists.len() >= 2
+}
+
+/// Raw artist value used for a track's partition key: the album artist, else (when
+/// keying by artist) the track artist.
+fn partition_artist(info: &TrackInfo, by_artist: bool) -> Option<&str> {
+    if !by_artist {
+        return None;
+    }
+    info.album_artist.as_deref().or(info.artist.as_deref())
+}
+
 /// Indices of `tracks` per album partition (see [`AlbumUnit::partitions`]).
-fn partition_indices<'a>(tracks: impl Iterator<Item = &'a TrackInfo>) -> Vec<Vec<usize>> {
-    let mut by_album: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
-    for (i, info) in tracks.enumerate() {
-        let key = info.album.as_deref().map(normalize_for_compare);
-        by_album.entry(key).or_default().push(i);
+fn partition_indices(tracks: &[&TrackInfo]) -> Vec<Vec<usize>> {
+    let by_artist = keys_by_artist(tracks);
+    let mut untitled: Vec<usize> = Vec::new();
+    let mut titled: BTreeMap<(String, Option<String>), Vec<usize>> = BTreeMap::new();
+    for (i, info) in tracks.iter().enumerate() {
+        match info.album.as_deref() {
+            Some(album) => {
+                let artist = partition_artist(info, by_artist).map(normalize_for_compare);
+                titled
+                    .entry((normalize_for_compare(album), artist))
+                    .or_default()
+                    .push(i);
+            }
+            None => untitled.push(i),
+        }
     }
-    let titled = by_album.keys().filter(|k| k.is_some()).count();
-    if titled <= 1 {
-        let all = by_album
-            .into_values()
-            .flatten()
-            .collect::<BTreeSet<usize>>();
-        return vec![all.into_iter().collect()];
+    if titled.len() <= 1 {
+        return vec![(0..tracks.len()).collect()];
     }
-    by_album.into_values().collect()
+    let mut groups = Vec::with_capacity(titled.len() + 1);
+    if !untitled.is_empty() {
+        groups.push(untitled);
+    }
+    groups.extend(titled.into_values());
+    groups
 }
 
 /// Multi-disc decision over a set of tracks (a partition): any disc tag > 1, any
 /// disc total > 1, any disc folder number > 1, 2+ distinct disc folders, or tracks
 /// from a disc folder alongside loose files in the parent directory.
 fn detect_multi_disc<'a>(tracks: impl Iterator<Item = &'a GroupedTrack> + Clone) -> bool {
-    let disc_folders: BTreeSet<&str> = tracks
+    // Identity by the real directory, not the (possibly colliding) lossy string.
+    let disc_folders: BTreeSet<PathBuf> = tracks
         .clone()
-        .filter_map(|t| t.disc_folder.as_deref())
+        .filter(|t| t.disc_folder.is_some())
+        .map(|t| rel_dir(&t.info))
         .collect();
     let has_loose = tracks.clone().any(|t| t.disc_folder.is_none());
     disc_folders.len() >= 2
@@ -250,16 +320,100 @@ fn strip_prefix_ascii_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
         .then(|| &s[prefix.len()..])
 }
 
-/// Where a track goes: (unit id, disc folder path + its number).
-fn locate(rel_path: &str) -> (String, Option<(String, u32)>) {
-    let Some((dir, _file)) = rel_path.rsplit_once('/') else {
-        return (".".to_owned(), None);
-    };
-    let (parent, last) = dir.rsplit_once('/').unwrap_or((".", dir));
-    match parse_disc_folder_name(last) {
-        Some(n) => (parent.to_owned(), Some((dir.to_owned(), n))),
-        None => (dir.to_owned(), None),
+/// Root-relative directory of a track, with the original (possibly non-UTF-8)
+/// bytes: the parent of the last `n` components of `info.path`, where `n` is the
+/// number of components of `rel_path`. Falls back to the directory part of
+/// `rel_path` if `path` does not end in components matching `rel_path` (only for
+/// hand-built `TrackInfo`s). Empty for the root.
+fn rel_dir(info: &TrackInfo) -> PathBuf {
+    let rel_parts: Vec<&str> = info.rel_path.split('/').collect();
+    let tail: Vec<&OsStr> = info
+        .path
+        .components()
+        .rev()
+        .take(rel_parts.len())
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    let matches = tail.len() == rel_parts.len()
+        && tail
+            .iter()
+            .rev()
+            .zip(&rel_parts)
+            .all(|(raw, lossy)| raw.to_string_lossy() == *lossy);
+    let dir_parts = rel_parts.len().saturating_sub(1);
+    if matches {
+        tail.iter().rev().take(dir_parts).collect()
+    } else {
+        rel_parts.iter().take(dir_parts).collect()
     }
+}
+
+/// Lossy `/`-separated form of a root-relative directory; `"."` for the root.
+fn lossy_id(dir: &Path) -> String {
+    let parts: Vec<String> = dir
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    }
+}
+
+/// Where a track goes: (real unit directory, real disc folder directory + its number).
+fn locate(info: &TrackInfo) -> (PathBuf, Option<(PathBuf, u32)>) {
+    let dir = rel_dir(info);
+    let Some(last) = dir.file_name() else {
+        return (dir, None);
+    };
+    match parse_disc_folder_name(&last.to_string_lossy()) {
+        Some(n) => {
+            let parent = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+            (parent, Some((dir, n)))
+        }
+        None => (dir, None),
+    }
+}
+
+/// Unique lossy display ids for distinct real paths (see module docs). Paths whose
+/// lossy forms collide are numbered in raw-byte order: the first keeps the plain
+/// id, later ones get the smallest free ` #N` (N >= 2).
+fn unique_ids<'a>(paths: impl IntoIterator<Item = &'a Path>) -> BTreeMap<&'a Path, String> {
+    let mut by_id: BTreeMap<String, Vec<&Path>> = BTreeMap::new();
+    for p in paths {
+        by_id.entry(lossy_id(p)).or_default().push(p);
+    }
+    let mut taken: BTreeSet<String> = by_id.keys().cloned().collect();
+    let mut out = BTreeMap::new();
+    for (id, mut group) in by_id {
+        group.sort_by(|a, b| {
+            a.as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.as_os_str().as_encoded_bytes())
+        });
+        group.dedup();
+        let mut iter = group.into_iter();
+        if let Some(first) = iter.next() {
+            out.insert(first, id.clone());
+        }
+        let mut n = 2u64;
+        for p in iter {
+            let candidate = loop {
+                let c = format!("{id} #{n}");
+                n += 1;
+                if !taken.contains(&c) {
+                    break c;
+                }
+            };
+            taken.insert(candidate.clone());
+            out.insert(p, candidate);
+        }
+    }
+    out
 }
 
 /// Most common value; ties go to the lexicographically smallest. `None` if empty.
@@ -280,26 +434,45 @@ pub(crate) fn most_common<'a>(values: impl IntoIterator<Item = &'a str>) -> Opti
 
 /// Group tracks (any order) into album units (sorted by id).
 pub fn group_tracks(tracks: Vec<TrackInfo>) -> Vec<AlbumUnit> {
-    let mut units: BTreeMap<String, Vec<GroupedTrack>> = BTreeMap::new();
+    // Keyed by the real unit directory; values carry each track's real disc folder.
+    type Located = (TrackInfo, Option<(PathBuf, u32)>);
+    let mut units: BTreeMap<PathBuf, Vec<Located>> = BTreeMap::new();
     for info in tracks {
-        let (id, disc) = locate(&info.rel_path);
-        let (disc_folder, folder_disc) = disc.unzip();
-        units.entry(id).or_default().push(GroupedTrack {
-            info,
-            folder_disc,
-            disc_folder,
-            effective_disc: None,
-        });
+        let (dir, disc) = locate(&info);
+        units.entry(dir).or_default().push((info, disc));
     }
-    units
-        .into_iter()
-        .map(|(id, tracks)| build_unit(id, tracks))
-        .collect()
+    let ids = unique_ids(units.keys().map(PathBuf::as_path));
+    let mut out: Vec<AlbumUnit> = units
+        .iter()
+        .map(|(dir, located)| {
+            let folder_names = unique_ids(
+                located
+                    .iter()
+                    .filter_map(|(_, disc)| disc.as_ref().map(|(p, _)| p.as_path())),
+            );
+            let tracks = located
+                .iter()
+                .map(|(info, disc)| GroupedTrack {
+                    info: info.clone(),
+                    folder_disc: disc.as_ref().map(|&(_, n)| n),
+                    disc_folder: disc
+                        .as_ref()
+                        .map(|(p, _)| folder_names[p.as_path()].clone()),
+                    effective_disc: None,
+                })
+                .collect();
+            build_unit(ids[dir.as_path()].clone(), tracks)
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
 }
 
 fn build_unit(id: String, mut tracks: Vec<GroupedTrack>) -> AlbumUnit {
     let mut is_unit_multi_disc = false;
-    for indices in partition_indices(tracks.iter().map(|t| &t.info)) {
+    let infos: Vec<&TrackInfo> = tracks.iter().map(|t| &t.info).collect();
+    let groups = partition_indices(&infos);
+    for indices in groups {
         let multi = detect_multi_disc(indices.iter().map(|&i| &tracks[i]));
         is_unit_multi_disc |= multi;
         for i in indices {
@@ -320,6 +493,7 @@ fn build_unit(id: String, mut tracks: Vec<GroupedTrack>) -> AlbumUnit {
         key(a)
             .cmp(&key(b))
             .then_with(|| a.info.rel_path.cmp(&b.info.rel_path))
+            .then_with(|| a.info.path.cmp(&b.info.path))
     });
 
     let title = most_common(tracks.iter().filter_map(|t| t.info.album.as_deref()));

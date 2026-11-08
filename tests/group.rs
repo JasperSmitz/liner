@@ -1,5 +1,7 @@
 //! M2: album grouping (ADR 0002) with hand-built `TrackInfo`s.
 
+use std::collections::BTreeSet;
+
 use liner::group::{AlbumUnit, group_tracks, parse_disc_folder_name};
 use liner::model::{AudioFormat, TrackInfo};
 
@@ -539,4 +541,182 @@ fn grouping_is_independent_of_input_order() {
     reversed.reverse();
     assert_eq!(group_tracks(tracks), group_tracks(reversed));
     assert!(group_tracks(Vec::new()).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Album partitions keyed by (album, album artist)
+
+fn tagged(rel: &str, album: Option<&str>, album_artist: Option<&str>, artist: &str) -> TrackInfo {
+    TrackInfo {
+        album: album.map(Into::into),
+        album_artist: album_artist.map(Into::into),
+        artist: Some(artist.into()),
+        ..t(rel)
+    }
+}
+
+fn labels(u: &AlbumUnit) -> Vec<Option<String>> {
+    u.partitions().into_iter().map(|p| p.label).collect()
+}
+
+#[test]
+fn same_title_by_different_album_artists_is_two_partitions() {
+    let mut tracks: Vec<TrackInfo> = (1..=3)
+        .map(|n| {
+            tagged(
+                &format!("Misc/a{n}.flac"),
+                Some("Greatest Hits"),
+                Some("Artist A"),
+                "Artist A",
+            )
+        })
+        .collect();
+    tracks.extend((1..=3).map(|n| {
+        tagged(
+            &format!("Misc/b{n}.flac"),
+            Some("Greatest Hits"),
+            Some("Artist B"),
+            "Artist B",
+        )
+    }));
+    let units = group_tracks(tracks);
+    let parts = unit(&units, "Misc").partitions();
+    assert_eq!(parts.len(), 2);
+    assert!(
+        parts
+            .iter()
+            .all(|p| p.tracks.len() == 3 && !p.is_untitled())
+    );
+    assert_eq!(
+        labels(unit(&units, "Misc")),
+        [
+            Some("Album 'Greatest Hits' by 'Artist A'".to_owned()),
+            Some("Album 'Greatest Hits' by 'Artist B'".to_owned()),
+        ]
+    );
+    // A track without an album artist falls back to its track artist.
+    let units = group_tracks(vec![
+        tagged("M/1.flac", Some("Hits"), Some("A"), "A"),
+        tagged("M/2.flac", Some("Hits"), None, "A"),
+        tagged("M/3.flac", Some("Hits"), Some("B"), "B"),
+    ]);
+    let sizes: Vec<usize> = unit(&units, "M")
+        .partitions()
+        .iter()
+        .map(|p| p.tracks.len())
+        .collect();
+    assert_eq!(sizes, [2, 1]);
+}
+
+#[test]
+fn compilations_stay_one_partition() {
+    // One album artist, many track artists.
+    let va: Vec<TrackInfo> = ["X", "Y", "Z"]
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            tagged(
+                &format!("VA/{i}.flac"),
+                Some("Hits"),
+                Some("Various Artists"),
+                a,
+            )
+        })
+        .collect();
+    // No album artist at all, many track artists.
+    let bare: Vec<TrackInfo> = ["X", "Y", "Z"]
+        .iter()
+        .enumerate()
+        .map(|(i, a)| tagged(&format!("Bare/{i}.flac"), Some("Hits"), None, a))
+        .collect();
+    let units = group_tracks(va.into_iter().chain(bare).collect());
+    for id in ["VA", "Bare"] {
+        assert_eq!(labels(unit(&units, id)), [None], "{id}");
+    }
+}
+
+#[test]
+fn tracks_without_album_form_an_untitled_partition() {
+    let units = group_tracks(vec![
+        tagged("Singles/a.flac", None, None, "A"),
+        tagged("Singles/b.flac", None, None, "B"),
+        tagged("Mixed/a.flac", None, None, "A"),
+        tagged("Mixed/b.flac", Some("One"), None, "B"),
+        tagged("Mixed/c.flac", Some("Two"), None, "C"),
+    ]);
+    let singles = unit(&units, "Singles").partitions();
+    assert_eq!(singles.len(), 1);
+    assert!(singles[0].is_untitled());
+    let mixed = unit(&units, "Mixed").partitions();
+    assert_eq!(mixed.len(), 3);
+    assert!(mixed[0].is_untitled());
+    assert_eq!(
+        mixed[0].label.as_deref(),
+        Some("Tracks without an album tag")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Identity by the real (possibly non-UTF-8) directory path
+
+#[cfg(unix)]
+fn raw(rel: &[u8]) -> TrackInfo {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let rel_os = std::path::Path::new(OsStr::from_bytes(rel));
+    let rel_lossy = String::from_utf8_lossy(rel).into_owned();
+    TrackInfo {
+        track_no: Some(2),
+        ..TrackInfo::new(
+            std::path::Path::new("/lib").join(rel_os),
+            rel_lossy,
+            AudioFormat::Flac,
+        )
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn directories_differing_only_in_invalid_bytes_are_separate_units() {
+    let units = group_tracks(vec![raw(b"Album\xff/02.flac"), raw(b"Album\xfe/02.flac")]);
+    let ids: Vec<&str> = units.iter().map(|u| u.id.as_str()).collect();
+    // Raw byte order: \xfe keeps the plain id.
+    assert_eq!(ids, ["Album\u{FFFD}", "Album\u{FFFD} #2"]);
+    assert!(units.iter().all(|u| u.tracks.len() == 1));
+    assert_eq!(units[0].tracks[0].info.path, raw(b"Album\xfe/02.flac").path);
+}
+
+#[cfg(unix)]
+#[test]
+fn disambiguated_ids_skip_existing_names() {
+    let units = group_tracks(vec![
+        raw(b"Album\xfe/02.flac"),
+        raw(b"Album\xff/02.flac"),
+        raw("Album\u{FFFD} #2/02.flac".as_bytes()),
+    ]);
+    let ids: BTreeSet<&str> = units.iter().map(|u| u.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["Album\u{FFFD}", "Album\u{FFFD} #2", "Album\u{FFFD} #3"].into()
+    );
+    let real = units.iter().find(|u| u.id == "Album\u{FFFD} #2").unwrap();
+    assert_eq!(real.tracks[0].info.rel_path, "Album\u{FFFD} #2/02.flac");
+}
+
+#[cfg(unix)]
+#[test]
+fn disc_folders_differing_only_in_invalid_bytes_are_two_discs() {
+    let units = group_tracks(vec![
+        raw(b"A/CD 1 \xfe/02.flac"),
+        raw(b"A/CD 1 \xff/02.flac"),
+    ]);
+    assert_eq!(units.len(), 1);
+    let a = unit(&units, "A");
+    assert!(a.is_multi_disc);
+    let folders: BTreeSet<&str> = a
+        .tracks
+        .iter()
+        .filter_map(|t| t.disc_folder.as_deref())
+        .collect();
+    assert_eq!(folders, ["A/CD 1 \u{FFFD}", "A/CD 1 \u{FFFD} #2"].into());
 }

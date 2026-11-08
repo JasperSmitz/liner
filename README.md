@@ -142,7 +142,9 @@ built-in default. Boolean options can only be switched on from the command line.
 ## How albums are grouped
 
 An album is a **directory** containing audio files (id = path relative to the
-library root, `.` for the root itself). Sub-directories named like a disc folder
+library root, `.` for the root itself; if two directory names differ only in
+bytes that are not valid UTF-8, the later one in byte order gets ` #2`, ` #3`, ...
+appended, so ids stay unique). Sub-directories named like a disc folder
 (`CD1`, `CD 2`, `Disc 1`, `Disk02`, `Disc 1 - Title`, case-insensitive) are merged
 into their parent album and serve as a disc number hint. Tags are then
 cross-checked inside each album, and the same album found in several directories
@@ -172,7 +174,10 @@ JSON Schema [`schema/liner-report.v1.schema.json`](schema/liner-report.v1.schema
 - A report with a non-empty `errors[]` is not clean. `options.min_severity` and
   `summary.issues_hidden` tell a filtered report from a clean library.
 - Paths are relative to `root`, `/`-separated; names that are not valid UTF-8
-  are converted lossily (U+FFFD).
+  are converted lossily (U+FFFD). Album `id`/`path`, disc `folder` and the
+  `folder` detail of `disc-folder-mismatch` are made unique with a ` #2`, ` #3`,
+  ... suffix when two distinct directories convert to the same string (ADR 0002);
+  such an id is not a path that exists on disk.
 
 One issue and one error from the library above:
 
