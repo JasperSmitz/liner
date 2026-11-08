@@ -9,7 +9,8 @@
 //!   directory is not descended into. The root itself is never considered hidden.
 //! - Classifies by file extension only (case-insensitive, [`AUDIO_EXTENSIONS`]);
 //!   content sniffing is the metadata stage's job.
-//! - Per-entry errors are collected, never fatal. Only an unusable root is fatal.
+//! - Per-entry errors are collected, never fatal. Only an unusable root is fatal:
+//!   missing, not a directory, or not listable (e.g. mode 000) => `LinerError`.
 //! - Opens nothing for writing; reads only directory listings and file metadata.
 //! - Output `audio_files` is sorted by `rel_path`.
 
@@ -69,7 +70,8 @@ pub fn is_audio_extension(ext: &str) -> bool {
 /// Walk `root` recursively.
 ///
 /// Errors: [`crate::error::LinerError::RootNotFound`] /
-/// [`crate::error::LinerError::RootNotDirectory`] if the root is unusable.
+/// [`crate::error::LinerError::RootNotDirectory`] if the root is unusable, and
+/// [`crate::error::LinerError::Io`] if it cannot be stat'ed or listed.
 ///
 /// Symlinks are skipped entirely (neither audio nor "other") unless
 /// `follow_symlinks` is set, in which case they are resolved and treated like their
@@ -127,10 +129,18 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanResult> {
     Ok(result)
 }
 
-/// Fatal checks on the root: it must exist and be a directory (symlinks resolved).
+/// Fatal checks on the root: it must exist, be a directory (symlinks resolved) and
+/// be listable. Without the listing check an unreadable root would surface as one
+/// non-fatal walk error and an apparently empty library.
 fn check_root(root: &Path) -> Result<()> {
     match std::fs::metadata(root) {
-        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(meta) if meta.is_dir() => match std::fs::read_dir(root) {
+            Ok(_) => Ok(()),
+            Err(source) => Err(LinerError::Io {
+                path: root.to_path_buf(),
+                source,
+            }),
+        },
         Ok(_) => Err(LinerError::RootNotDirectory(root.to_path_buf())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             Err(LinerError::RootNotFound(root.to_path_buf()))

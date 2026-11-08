@@ -163,6 +163,24 @@ fn bad_root_exits_2() {
         .stderr(predicate::str::contains("does not exist"));
 }
 
+#[cfg(unix)]
+#[test]
+fn unreadable_root_exits_2() {
+    let lib = common::Library::new();
+    lib.mkdir("Lib");
+    lib.chmod("Lib", 0o000);
+    if std::fs::read_dir(lib.path("Lib")).is_ok() {
+        eprintln!("skipping: running with permission override (root?)");
+        return;
+    }
+    liner()
+        .arg("scan")
+        .arg(lib.path("Lib"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Permission denied"));
+}
+
 #[test]
 fn unknown_flag_and_bad_values_exit_2() {
     liner().args(["scan", "--frobnicate"]).assert().code(2);
