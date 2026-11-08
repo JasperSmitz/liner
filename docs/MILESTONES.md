@@ -6,6 +6,10 @@ M1–M3 run **in parallel** on top of M0 (one developer each, separate files, se
 `cargo fmt --check` green, must not change frozen interfaces without the lead, and
 must never touch `/storage/music`.
 
+Status (M4 integration on branch `mvp`): M0–M3 are done, each followed by a review
+fix round (M1/M3 fixes, and the M2 review that introduced album partitions, see
+ADR 0002). M4 is done except the final review pass over the integrated code.
+
 ## M0: Skeleton (architect) — done
 
 - Docs: ARCHITECTURE, ADRs 0001–0005, MILESTONES, RULES.
@@ -18,7 +22,7 @@ must never touch `/storage/music`.
 - Acceptance: the four commands above pass; `liner rules`, `liner schema` work;
   `liner scan <dir>` prints an empty report.
 
-## M1: Scan + metadata + fixtures (developer A)
+## M1: Scan + metadata + fixtures (developer A) — done
 
 Files: `src/scan.rs`, `src/metadata.rs`, `tests/common/mod.rs`, new `tests/scan*.rs`,
 `tests/metadata*.rs`.
@@ -44,14 +48,17 @@ Acceptance:
   root) yields a `walk` error and the scan continues.
 - `read_all` output identical across repeated runs.
 
-## M2: Grouping + rules (developer B)
+## M2: Grouping + rules (developer B) — done
 
 Files: `src/group.rs`, `src/rules.rs` (+ optional `src/rules/*.rs`), new
 `tests/group*.rs`, `tests/rules*.rs`. Tests use hand-built `TrackInfo`s.
 
 - `parse_disc_folder_name` per ADR 0002; `group_tracks` with merge, folder hints,
-  effective disc, multi-disc detection, title/album artist consensus, disc_count,
-  sorting; `AlbumUnit::album_key`.
+  album partitions (one per distinct normalised album title in a unit), per-partition
+  multi-disc detection and effective disc, title/album artist consensus,
+  disc_count, sorting; per-partition `album_key` (`AlbumPartition::album_key`;
+  `AlbumUnit::album_key` only for single-partition units). Split detection groups
+  partitions, not units, by that key.
 - Every rule in `docs/RULES.md` implemented with the documented triggers and
   `details` keys; `run_all` sorted.
 Acceptance:
@@ -68,7 +75,7 @@ Acceptance:
   issues; same without album artist → only `missing-album-artist`.
 - A test asserting every `CATALOG` code is emitted by at least one test scenario.
 
-## M3: Report model + JSON schema + human renderer + CLI (developer C)
+## M3: Report model + JSON schema + human renderer + CLI (developer C) — done
 
 Files: `src/report.rs` (functions only; types frozen), `src/render.rs`,
 `src/config.rs`, `src/cli.rs`, new `tests/cli*.rs`, `tests/report*.rs`.
@@ -95,18 +102,22 @@ Acceptance:
 - Error messages: `LinerError`/`ConfigError` Display strings never repeat their
   `#[source]` (main prints the chain with `{:#}`).
 
-## M4: Integration tests + docs + review hardening (all / lead)
+## M4: Integration tests + docs + review hardening (all / lead) — in progress
 
 - End-to-end tests on synthetic libraries built with `tests/common` covering every
-  rule code through the binary, both output formats.
+  rule code through the binary, both output formats. **Done:** `tests/e2e.rs`
+  (realistic multi-disc layouts, mixed formats, every `CATALOG` code asserted).
 - Read-only test: snapshot (bytes + mtime + size) of every file in a fixture
   library before and after `liner scan --format json` (with `--output` outside the
-  library) — must be identical, and no new files inside the library.
+  library) — must be identical, and no new files inside the library. **Done:**
+  `tests/readonly.rs`.
 - Robustness: corrupt fixtures, non-UTF-8 file names (Linux), empty library, a
-  library with only non-audio files, deep nesting.
+  library with only non-audio files, deep nesting. **Done:** `tests/robustness.rs`.
 - Performance smoke test: 2 000 generated files analysed in < 10 s in release
-  mode (ignored by default; run in CI/release check).
+  mode (ignored by default; run in CI/release check). **Done:** `tests/perf.rs`.
 - README: install, usage, exit codes, config, JSON contract pointer, consumer
-  guidance (ADR 0003).
+  guidance (ADR 0003). **Done**; example output captured from the release binary.
 - Review pass (code review + simplification), all clippy/test/fmt green, no
-  `unwrap` on file-derived data outside tests.
+  `unwrap` on file-derived data outside tests. **Open:** the per-module review
+  fixes for M1–M3 are merged; a final review of the integrated code is still to
+  do. fmt/clippy/test are green.

@@ -54,7 +54,7 @@ PATH ─► scan::scan ──► ScanResult { audio_files, other_files, errors }
             │
             ▼
       group::group_tracks ──► Vec<AlbumUnit> (directory units, disc folders merged,
-            │                                  effective disc per track)
+            │                                  album partitions, effective disc per track)
             ▼
       rules::run_all ──► Vec<Issue> (sorted)
             │
@@ -75,7 +75,8 @@ Key contracts (details in module docs):
   Everything user-visible uses `rel_path`: root-relative, `/`-separated, lossy
   UTF-8 (`model::rel_path_string`). The root album id is `"."`.
 - **Text values** keep their original spelling. Comparisons use
-  `model::normalize_for_compare` (trim, collapse whitespace, Unicode lowercase).
+  `model::normalize_for_compare` (Unicode NFC, curly quotes folded to straight
+  ones, trim, collapse whitespace, Unicode lowercase).
   Empty/whitespace text and numeric `0` are read as "absent".
 - **Determinism.** All outputs are sorted (scan by rel_path, units by id, issues by
   `Issue::sort_key`, errors by path; maps are `BTreeMap`). Parallel reading must not
@@ -159,8 +160,8 @@ liner schema    # print the report JSON Schema
 4. Test code that writes tags (`tests/common/mod.rs`) opts out explicitly and only
    writes inside its own `TempDir`. Tests never read the developer's real config
    (`XDG_CONFIG_HOME`/`HOME` are overridden) and never touch `/storage/music`.
-5. M4 adds an integration test asserting that a scanned fixture library is
-   byte-for-byte and mtime-identical before and after `liner scan`.
+5. `tests/readonly.rs` asserts that a scanned fixture library is byte-, mtime- and
+   permission-identical before and after `liner scan`, with no new files inside.
 
 ## Performance notes
 
@@ -170,7 +171,10 @@ liner schema    # print the report JSON Schema
   the properties needed for duration, so cost is roughly proportional to tag size,
   not audio size.
 - Grouping uses `BTreeMap`s keyed by directory/normalised values: O(n log n).
-  Library-scope split detection groups units by `album_key` (one map pass).
+  Library-scope split detection groups album *partitions* (not whole units) by
+  their per-partition `album_key` (one map pass over all partitions; ADR 0002),
+  so a mixed directory can take part in a split with each of its albums.
 - Memory: one `TrackInfo` per file (a few hundred bytes); a 100k-track library
   stays well under 100 MB. No caching between runs.
-- Target: 10k files on a warm cache in a few seconds; measured in M4.
+- Target: 10k files on a warm cache in a few seconds. Measured by the ignored
+  `tests/perf.rs` smoke test (2 000 files through the release binary in < 10 s).
