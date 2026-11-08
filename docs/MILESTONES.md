@@ -8,7 +8,10 @@ must never touch `/storage/music`.
 
 Status (M4 integration on branch `mvp`): M0–M3 are done, each followed by a review
 fix round (M1/M3 fixes, and the M2 review that introduced album partitions, see
-ADR 0002). M4 is done except the final review pass over the integrated code.
+ADR 0002). M4 is done, including a final two-reviewer pass (Claude + Codex) over
+the integrated code and its fix round (atomic, handle-based `--output`; control
+character escaping; partitions keyed on album + album artist; grouping on real
+paths for non-UTF-8 names).
 
 ## M0: Skeleton (architect) — done
 
@@ -102,7 +105,7 @@ Acceptance:
 - Error messages: `LinerError`/`ConfigError` Display strings never repeat their
   `#[source]` (main prints the chain with `{:#}`).
 
-## M4: Integration tests + docs + review hardening (all / lead) — in progress
+## M4: Integration tests + docs + review hardening (all / lead) — done
 
 - End-to-end tests on synthetic libraries built with `tests/common` covering every
   rule code through the binary, both output formats. **Done:** `tests/e2e.rs`
@@ -118,6 +121,6 @@ Acceptance:
 - README: install, usage, exit codes, config, JSON contract pointer, consumer
   guidance (ADR 0003). **Done**; example output captured from the release binary.
 - Review pass (code review + simplification), all clippy/test/fmt green, no
-  `unwrap` on file-derived data outside tests. **Open:** the per-module review
-  fixes for M1–M3 are merged; a final review of the integrated code is still to
-  do. fmt/clippy/test are green.
+  `unwrap` on file-derived data outside tests. **Done:** per-module reviews for
+  M1–M3 and a final review of the integrated code, all findings fixed;
+  fmt/clippy/test are green.
