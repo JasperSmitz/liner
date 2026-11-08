@@ -45,7 +45,12 @@ need a stable, documented, versioned format.
 - **Determinism**: all arrays sorted (see `report.rs` docs), maps are
   `BTreeMap`, pretty-printed with a trailing newline. Same input + same
   `generated_at` ⇒ identical bytes, so reports are diffable.
-- `errors[]` lists files that could not be walked or read. They carry no issue
+- `issues[].message` is single-line: control characters from tag values are
+  escaped as `\u{XX}` text (e.g. `\u{1b}`, `\u{a}`). `paths`, `root` and the
+  values in `details` are exact (JSON-escaped), never altered.
+- `errors[]` lists files that could not be walked or read. Two distinct files
+  whose lossy paths are equal are separate entries (deduplication uses the real
+  path), so `summary.unreadable_files` counts files, not display names. They carry no issue
   code or severity in the JSON, but they are a library-health signal: the CLI
   treats them as error severity for `--fail-on` (exit 1 unless `--fail-on never`).
   Consumers should likewise not treat a report with a non-empty `errors[]` as
@@ -57,6 +62,9 @@ need a stable, documented, versioned format.
 - M3 review (pre-release, so fixed in place with `SCHEMA_VERSION` still `1.0.0`):
   all keys `required`, open enums as above, `generated_at` format, `options` and
   `summary.issues_hidden` added.
+- Final review (pre-release, `SCHEMA_VERSION` still `1.0.0`): `message` is
+  guaranteed single-line (control characters escaped), and `errors[]` keeps
+  entries whose lossy paths collide.
 
 ## Consequences
 - Every report type change is a visible diff in `schema/` and needs a deliberate

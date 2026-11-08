@@ -201,12 +201,13 @@ fn run_scan(args: &ScanArgs, stdout: &mut dyn Write) -> Result<Outcome> {
     let config = config::load(args.config.as_deref())?;
     let settings = resolve_scan_settings(args, &config)?;
 
-    // Cheap checks of the output target before doing any work; the file itself is
-    // opened only once the report is fully rendered, so a failed run never empties
-    // an existing file.
-    if let Some(path) = &settings.output {
-        render::check_output_path(path, &settings.root)?;
-    }
+    // Validate the output target before doing any work and keep its directory
+    // handle. The report is written (to a temporary file renamed into place) only
+    // once it is fully rendered, so a failed run never touches an existing file.
+    let output = match &settings.output {
+        Some(path) => Some(render::check_output_path(path, &settings.root)?),
+        None => None,
+    };
 
     let mut report = crate::analyze(&settings.root, &settings.scan, jiff::Timestamp::now())?;
 
@@ -214,18 +215,15 @@ fn run_scan(args: &ScanArgs, stdout: &mut dyn Write) -> Result<Outcome> {
     let result = report_outcome(&report, settings.fail_on);
     report.retain_min_severity(settings.min_severity);
 
-    match &settings.output {
-        Some(path) => {
+    match &output {
+        Some(target) => {
             let human = HumanOptions {
                 color: settings.color == ColorChoice::Always,
             };
             let mut rendered = Vec::new();
             render::render_with(&report, settings.format, human, &mut rendered)
                 .map_err(LinerError::Output)?;
-            let mut file = render::create_output_file(path)?;
-            file.write_all(&rendered)
-                .and_then(|()| file.flush())
-                .map_err(LinerError::Output)?;
+            target.write(&rendered)?;
         }
         None => {
             let color = render::use_color(
