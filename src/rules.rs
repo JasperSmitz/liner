@@ -18,6 +18,12 @@ use std::collections::BTreeMap;
 use crate::group::AlbumUnit;
 use crate::model::{Issue, Scope, Severity};
 
+mod album_tags;
+mod file;
+mod library;
+mod numbering;
+mod util;
+
 /// Stable issue codes. Keep in sync with `docs/RULES.md` and [`CATALOG`].
 pub mod codes {
     // File scope
@@ -222,9 +228,15 @@ pub fn rule_info(code: &str) -> Option<&'static RuleInfo> {
 
 /// Run every rule over all album units. Output sorted by [`Issue::sort_key`].
 pub fn run_all(albums: &[AlbumUnit]) -> Vec<Issue> {
-    // M2 placeholder: real rules to be implemented by developer B.
-    let _ = albums;
-    Vec::new()
+    let mut issues = Vec::new();
+    for unit in albums {
+        file::check(unit, &mut issues);
+        numbering::check(unit, &mut issues);
+        album_tags::check(unit, &mut issues);
+    }
+    library::check(albums, &mut issues);
+    issues.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    issues
 }
 
 #[cfg(test)]
