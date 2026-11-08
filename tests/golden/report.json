@@ -1,0 +1,345 @@
+{
+  "schema_version": "1.0.0",
+  "tool": {
+    "name": "liner",
+    "version": "0.0.0-test"
+  },
+  "generated_at": "2026-11-08T10:00:00Z",
+  "root": "/library",
+  "summary": {
+    "files_scanned": 11,
+    "audio_files": 8,
+    "unreadable_files": 2,
+    "albums": 3,
+    "issues_by_severity": {
+      "error": 1,
+      "warning": 4,
+      "info": 2
+    },
+    "issues_by_code": {
+      "duplicate-track-position": 1,
+      "inconsistent-year": 1,
+      "missing-album-artist": 1,
+      "missing-disc-number": 1,
+      "missing-title": 1,
+      "missing-track-number": 1,
+      "split-album": 1
+    }
+  },
+  "albums": [
+    {
+      "id": ".",
+      "path": ".",
+      "title": "Album",
+      "album_artist": "Artist",
+      "disc_count": 1,
+      "track_count": 1,
+      "discs": [
+        {
+          "number": 1,
+          "folder": null,
+          "tracks": [
+            {
+              "path": "loose.flac",
+              "format": "flac",
+              "title": null,
+              "artist": null,
+              "album": "Album",
+              "album_artist": "Artist",
+              "track_no": null,
+              "track_total": null,
+              "disc_no": null,
+              "disc_total": null,
+              "year": null,
+              "genre": null,
+              "compilation": false,
+              "duration_ms": null,
+              "tag_types": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Artist/Album",
+      "path": "Artist/Album",
+      "title": "Album",
+      "album_artist": "Artist",
+      "disc_count": 2,
+      "track_count": 4,
+      "discs": [
+        {
+          "number": 1,
+          "folder": "Artist/Album/CD1",
+          "tracks": [
+            {
+              "path": "Artist/Album/CD1/01.flac",
+              "format": "flac",
+              "title": "One",
+              "artist": "Artist",
+              "album": "Album",
+              "album_artist": "Artist",
+              "track_no": 1,
+              "track_total": 2,
+              "disc_no": 1,
+              "disc_total": 2,
+              "year": 1999,
+              "genre": null,
+              "compilation": false,
+              "duration_ms": 200,
+              "tag_types": [
+                "vorbis-comments"
+              ]
+            },
+            {
+              "path": "Artist/Album/CD1/02.flac",
+              "format": "flac",
+              "title": "Two",
+              "artist": "Artist",
+              "album": "Album",
+              "album_artist": "Artist",
+              "track_no": 2,
+              "track_total": 2,
+              "disc_no": 1,
+              "disc_total": 2,
+              "year": 1999,
+              "genre": null,
+              "compilation": false,
+              "duration_ms": 200,
+              "tag_types": [
+                "vorbis-comments"
+              ]
+            }
+          ]
+        },
+        {
+          "number": 2,
+          "folder": "Artist/Album/CD2",
+          "tracks": [
+            {
+              "path": "Artist/Album/CD2/01.flac",
+              "format": "flac",
+              "title": null,
+              "artist": "Artist",
+              "album": "Album",
+              "album_artist": "Artist",
+              "track_no": 1,
+              "track_total": null,
+              "disc_no": null,
+              "disc_total": null,
+              "year": 1999,
+              "genre": null,
+              "compilation": false,
+              "duration_ms": 200,
+              "tag_types": [
+                "vorbis-comments"
+              ]
+            }
+          ]
+        },
+        {
+          "number": null,
+          "folder": null,
+          "tracks": [
+            {
+              "path": "Artist/Album/bonus.flac",
+              "format": "flac",
+              "title": "Bonus",
+              "artist": "Artist",
+              "album": "Album",
+              "album_artist": "Artist",
+              "track_no": null,
+              "track_total": null,
+              "disc_no": null,
+              "disc_total": null,
+              "year": 1999,
+              "genre": null,
+              "compilation": false,
+              "duration_ms": 200,
+              "tag_types": [
+                "vorbis-comments"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Various/Comp",
+      "path": "Various/Comp",
+      "title": "Comp",
+      "album_artist": null,
+      "disc_count": 1,
+      "track_count": 2,
+      "discs": [
+        {
+          "number": 1,
+          "folder": null,
+          "tracks": [
+            {
+              "path": "Various/Comp/01 Ann.mp3",
+              "format": "mp3",
+              "title": "Song 1",
+              "artist": "Ann",
+              "album": "Comp",
+              "album_artist": null,
+              "track_no": 1,
+              "track_total": null,
+              "disc_no": null,
+              "disc_total": null,
+              "year": 2001,
+              "genre": "Pop",
+              "compilation": true,
+              "duration_ms": null,
+              "tag_types": [
+                "id3v1",
+                "id3v2"
+              ]
+            },
+            {
+              "path": "Various/Comp/02 Bob.mp3",
+              "format": "mp3",
+              "title": "Song 2",
+              "artist": "Bob",
+              "album": "Comp",
+              "album_artist": null,
+              "track_no": 2,
+              "track_total": null,
+              "disc_no": null,
+              "disc_total": null,
+              "year": 2002,
+              "genre": "Pop",
+              "compilation": true,
+              "duration_ms": null,
+              "tag_types": [
+                "id3v1",
+                "id3v2"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "issues": [
+    {
+      "code": "duplicate-track-position",
+      "severity": "error",
+      "scope": "album",
+      "message": "Disc 1 track 1 appears in 2 files",
+      "album_id": "Artist/Album",
+      "paths": [
+        "Artist/Album/CD1/01.flac",
+        "loose.flac"
+      ],
+      "details": {
+        "disc": 1,
+        "track": 1
+      }
+    },
+    {
+      "code": "missing-album-artist",
+      "severity": "warning",
+      "scope": "album",
+      "message": "Tracks have 2 different artists but no album artist",
+      "album_id": "Various/Comp",
+      "paths": [
+        "Various/Comp/01 Ann.mp3",
+        "Various/Comp/02 Bob.mp3"
+      ],
+      "details": {
+        "artists": [
+          "Ann",
+          "Bob"
+        ]
+      }
+    },
+    {
+      "code": "missing-disc-number",
+      "severity": "warning",
+      "scope": "album",
+      "message": "2 tracks of a multi-disc album have no disc number",
+      "album_id": "Artist/Album",
+      "paths": [
+        "Artist/Album/CD2/01.flac",
+        "Artist/Album/bonus.flac"
+      ],
+      "details": {
+        "count": 2
+      }
+    },
+    {
+      "code": "missing-track-number",
+      "severity": "warning",
+      "scope": "file",
+      "message": "Track has no track number",
+      "album_id": "Artist/Album",
+      "paths": [
+        "Artist/Album/bonus.flac"
+      ],
+      "details": {}
+    },
+    {
+      "code": "split-album",
+      "severity": "warning",
+      "scope": "library",
+      "message": "Album \"Album\" by Artist is spread over 2 directories",
+      "album_id": null,
+      "paths": [
+        "Artist/Album/CD1/01.flac",
+        "Artist/Album/CD1/02.flac",
+        "Artist/Album/CD2/01.flac",
+        "Artist/Album/bonus.flac",
+        "loose.flac"
+      ],
+      "details": {
+        "album": "Album",
+        "album_artist": "Artist",
+        "album_ids": [
+          ".",
+          "Artist/Album"
+        ]
+      }
+    },
+    {
+      "code": "inconsistent-year",
+      "severity": "info",
+      "scope": "album",
+      "message": "Tracks have different years: 2001, 2002",
+      "album_id": "Various/Comp",
+      "paths": [
+        "Various/Comp/01 Ann.mp3",
+        "Various/Comp/02 Bob.mp3"
+      ],
+      "details": {
+        "values": [
+          2001,
+          2002
+        ]
+      }
+    },
+    {
+      "code": "missing-title",
+      "severity": "info",
+      "scope": "file",
+      "message": "Track has no title",
+      "album_id": "Artist/Album",
+      "paths": [
+        "Artist/Album/CD2/01.flac"
+      ],
+      "details": {}
+    }
+  ],
+  "errors": [
+    {
+      "path": "Artist/Album/bad.flac",
+      "kind": "corrupt",
+      "message": "truncated STREAMINFO block"
+    },
+    {
+      "path": "Locked",
+      "kind": "walk",
+      "message": "permission denied"
+    }
+  ]
+}
