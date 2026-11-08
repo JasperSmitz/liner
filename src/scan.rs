@@ -15,8 +15,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
-use crate::model::FileError;
+use walkdir::{DirEntry, WalkDir};
+
+use crate::error::{LinerError, Result};
+use crate::model::{FileError, FileErrorKind, rel_path_string};
 
 /// Extensions (lowercase, without dot) treated as audio files.
 pub const AUDIO_EXTENSIONS: &[&str] = &[
@@ -68,10 +70,98 @@ pub fn is_audio_extension(ext: &str) -> bool {
 ///
 /// Errors: [`crate::error::LinerError::RootNotFound`] /
 /// [`crate::error::LinerError::RootNotDirectory`] if the root is unusable.
+///
+/// Symlinks are skipped entirely (neither audio nor "other") unless
+/// `follow_symlinks` is set, in which case they are resolved and treated like their
+/// targets. Special files (FIFOs, sockets, devices) are ignored.
 pub fn scan(root: &Path, options: &ScanOptions) -> Result<ScanResult> {
-    // M1 placeholder: real walk to be implemented by developer A.
-    let _ = (root, options);
-    Ok(ScanResult::default())
+    check_root(root)?;
+
+    let mut result = ScanResult::default();
+    let walker = WalkDir::new(root)
+        .follow_links(options.follow_symlinks)
+        .into_iter()
+        .filter_entry(|entry| options.include_hidden || entry.depth() == 0 || !is_hidden(entry));
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                result.errors.push(walk_error(root, &err));
+                continue;
+            }
+        };
+        let file_type = entry.file_type();
+        if !file_type.is_file() {
+            // Directories are descended by walkdir; unfollowed symlinks and special
+            // files are deliberately ignored.
+            continue;
+        }
+        let path = entry.path();
+        let audio = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(is_audio_extension);
+        if !audio {
+            result.other_files += 1;
+            continue;
+        }
+        match entry.metadata() {
+            Ok(meta) => result.audio_files.push(ScannedFile {
+                path: path.to_path_buf(),
+                rel_path: rel_path_string(root, path),
+                size: meta.len(),
+            }),
+            Err(err) => result.errors.push(walk_error(root, &err)),
+        }
+    }
+
+    // Lossy rel_paths of distinct non-UTF-8 names can collide; break ties on the
+    // real path so the order stays total and deterministic.
+    result
+        .audio_files
+        .sort_by(|a, b| (&a.rel_path, &a.path).cmp(&(&b.rel_path, &b.path)));
+    result.errors.sort_by(|a, b| {
+        (&a.rel_path, &a.path, &a.message).cmp(&(&b.rel_path, &b.path, &b.message))
+    });
+    Ok(result)
+}
+
+/// Fatal checks on the root: it must exist and be a directory (symlinks resolved).
+fn check_root(root: &Path) -> Result<()> {
+    match std::fs::metadata(root) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(LinerError::RootNotDirectory(root.to_path_buf())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(LinerError::RootNotFound(root.to_path_buf()))
+        }
+        Err(source) => Err(LinerError::Io {
+            path: root.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn is_hidden(entry: &DirEntry) -> bool {
+    entry.file_name().as_encoded_bytes().starts_with(b".")
+}
+
+fn walk_error(root: &Path, err: &walkdir::Error) -> FileError {
+    let path = err.path().unwrap_or(root).to_path_buf();
+    let message = match (err.loop_ancestor(), err.io_error()) {
+        (Some(ancestor), _) => format!(
+            "symlink loop: points to ancestor {}",
+            rel_path_string(root, ancestor)
+        ),
+        (None, Some(io)) => io.to_string(),
+        (None, None) => err.to_string(),
+    };
+    FileError {
+        rel_path: rel_path_string(root, &path),
+        path,
+        kind: FileErrorKind::Walk,
+        message,
+    }
 }
 
 #[cfg(test)]
