@@ -1,0 +1,479 @@
+{
+  "$defs": {
+    "AlbumEntry": {
+      "description": "One album unit (a directory, with disc sub-folders merged).",
+      "properties": {
+        "album_artist": {
+          "description": "Most common album artist tag value, original spelling.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disc_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "discs": {
+          "items": {
+            "$ref": "#/$defs/DiscEntry"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Stable id: root-relative directory path, \"/\"-separated; \".\" for the root.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Same as `id` in schema 1.x (kept separate so ids may change form later).",
+          "type": "string"
+        },
+        "title": {
+          "description": "Most common album tag value, original spelling.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "track_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "disc_count",
+        "track_count",
+        "discs"
+      ],
+      "type": "object"
+    },
+    "AudioFormat": {
+      "description": "Audio container/codec as detected by the tag reader (content-based, not by extension).",
+      "enum": [
+        "flac",
+        "mp3",
+        "ogg-vorbis",
+        "opus",
+        "speex",
+        "mp4",
+        "aac",
+        "wav",
+        "aiff",
+        "ape",
+        "wav-pack",
+        "musepack"
+      ],
+      "type": "string"
+    },
+    "DiscEntry": {
+      "properties": {
+        "folder": {
+          "description": "Root-relative disc folder (e.g. \"Artist/Album/CD1\"), when the tracks live in one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "number": {
+          "description": "Effective disc number; null when it cannot be determined (multi-disc album\nwith untagged files outside disc folders).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tracks": {
+          "items": {
+            "$ref": "#/$defs/TrackEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tracks"
+      ],
+      "type": "object"
+    },
+    "FileErrorEntry": {
+      "description": "A file that could not be walked or read.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/FileErrorKind"
+        },
+        "message": {
+          "description": "Human-readable reason; wording is not part of the contract.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Root-relative path, \"/\"-separated.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FileErrorKind": {
+      "description": "Why a file could not be scanned or read.",
+      "oneOf": [
+        {
+          "const": "walk",
+          "description": "Directory walk failed for this entry (permission denied, symlink loop, ...).",
+          "type": "string"
+        },
+        {
+          "const": "io",
+          "description": "I/O error while opening/reading the file.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "Format not recognised or not supported by the tag reader.",
+          "type": "string"
+        },
+        {
+          "const": "corrupt",
+          "description": "Recognised format but the file is malformed, truncated or empty.",
+          "type": "string"
+        }
+      ]
+    },
+    "Issue": {
+      "description": "One finding produced by a lint rule. Serialised verbatim into `issues[]`.",
+      "properties": {
+        "album_id": {
+          "default": null,
+          "description": "Album id (root-relative directory) for file/album issues; null for library scope.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "description": "Stable kebab-case rule code, see `docs/RULES.md` and `rules::codes`.",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Rule-specific structured data; keys per rule are documented in `docs/RULES.md`.",
+          "type": "object"
+        },
+        "message": {
+          "description": "Human-readable, single line. Not part of the stable contract (wording may change).",
+          "type": "string"
+        },
+        "paths": {
+          "description": "Affected files, root-relative, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "scope",
+        "message",
+        "paths"
+      ],
+      "type": "object"
+    },
+    "Scope": {
+      "description": "What an issue is about.",
+      "enum": [
+        "file",
+        "album",
+        "library"
+      ],
+      "type": "string"
+    },
+    "Severity": {
+      "description": "Issue severity. Ordering: `Info < Warning < Error`.",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    },
+    "SeverityCounts": {
+      "properties": {
+        "error": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "info": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warning": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "error",
+        "warning",
+        "info"
+      ],
+      "type": "object"
+    },
+    "Summary": {
+      "properties": {
+        "albums": {
+          "description": "Number of entries in `albums`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "audio_files": {
+          "description": "Files with an audio extension (readable or not).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_scanned": {
+          "description": "Regular files seen during the walk (audio + non-audio).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issues_by_code": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Issue count per code; only codes with at least one issue appear.",
+          "type": "object"
+        },
+        "issues_by_severity": {
+          "$ref": "#/$defs/SeverityCounts",
+          "description": "Counts of the issues in this report (after `--min-severity` filtering)."
+        },
+        "unreadable_files": {
+          "description": "Number of entries in `errors`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "files_scanned",
+        "audio_files",
+        "unreadable_files",
+        "albums",
+        "issues_by_severity",
+        "issues_by_code"
+      ],
+      "type": "object"
+    },
+    "TagKind": {
+      "description": "Kind of tag block present in a file. Mirrors lofty's `TagType` without leaking it.",
+      "enum": [
+        "id3v1",
+        "id3v2",
+        "ape",
+        "vorbis-comments",
+        "mp4-ilst",
+        "riff-info",
+        "aiff-text"
+      ],
+      "type": "string"
+    },
+    "ToolInfo": {
+      "properties": {
+        "name": {
+          "description": "Always \"liner\".",
+          "type": "string"
+        },
+        "version": {
+          "description": "Crate version of the producing binary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "TrackEntry": {
+      "properties": {
+        "album": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "album_artist": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artist": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compilation": {
+          "type": "boolean"
+        },
+        "disc_no": {
+          "description": "Disc number as tagged (not the effective/folder disc).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "disc_total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "format": {
+          "$ref": "#/$defs/AudioFormat"
+        },
+        "genre": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Root-relative file path, \"/\"-separated.",
+          "type": "string"
+        },
+        "tag_types": {
+          "items": {
+            "$ref": "#/$defs/TagKind"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "track_no": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "track_total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "year": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "compilation",
+        "tag_types"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Metadata lint report produced by `liner scan --format json`. Consumers must ignore unknown fields and tolerate unknown enum values in `code`.",
+  "properties": {
+    "albums": {
+      "items": {
+        "$ref": "#/$defs/AlbumEntry"
+      },
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/FileErrorEntry"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "description": "RFC 3339 UTC timestamp, e.g. \"2026-11-08T10:00:00Z\".",
+      "type": "string"
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/Issue"
+      },
+      "type": "array"
+    },
+    "root": {
+      "description": "Absolute path of the scanned library root (lossy UTF-8).",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "Semver of this schema, e.g. \"1.0.0\". Consumers should check the major version.",
+      "type": "string"
+    },
+    "summary": {
+      "$ref": "#/$defs/Summary"
+    },
+    "tool": {
+      "$ref": "#/$defs/ToolInfo"
+    }
+  },
+  "required": [
+    "schema_version",
+    "tool",
+    "generated_at",
+    "root",
+    "summary",
+    "albums",
+    "issues",
+    "errors"
+  ],
+  "title": "Liner report",
+  "type": "object"
+}

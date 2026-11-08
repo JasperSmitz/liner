@@ -1,0 +1,24 @@
+# Read-only guarantee (see docs/ARCHITECTURE.md, "Read-only guarantees").
+# Library/binary code must never write, rename or delete anything except the
+# user-requested --output report file. Test helpers that tag *temporary copies*
+# of fixtures opt out locally with #[allow(clippy::disallowed_methods)].
+disallowed-methods = [
+    { path = "std::fs::remove_file", reason = "liner is read-only" },
+    { path = "std::fs::remove_dir", reason = "liner is read-only" },
+    { path = "std::fs::remove_dir_all", reason = "liner is read-only" },
+    { path = "std::fs::rename", reason = "liner is read-only" },
+    { path = "std::fs::copy", reason = "liner is read-only" },
+    { path = "std::fs::set_permissions", reason = "liner is read-only" },
+    { path = "std::fs::write", reason = "liner is read-only; only render::create_output_file may create files" },
+    { path = "std::fs::File::create", reason = "liner is read-only; only render::create_output_file may create files" },
+    { path = "std::fs::File::create_new", reason = "liner is read-only; only render::create_output_file may create files" },
+    { path = "std::fs::OpenOptions::new", reason = "liner is read-only; only render::create_output_file may create files" },
+    { path = "lofty::file::AudioFile::save_to_path", reason = "liner never writes tags" },
+    { path = "lofty::file::AudioFile::save_to", reason = "liner never writes tags" },
+    { path = "lofty::tag::TagExt::save_to_path", reason = "liner never writes tags" },
+    { path = "lofty::tag::TagExt::save_to", reason = "liner never writes tags" },
+    { path = "lofty::tag::TagExt::remove_from_path", reason = "liner never writes tags" },
+    { path = "lofty::tag::TagExt::remove_from", reason = "liner never writes tags" },
+    { path = "lofty::tag::TagType::remove_from_path", reason = "liner never writes tags" },
+    { path = "lofty::tag::TagType::remove_from", reason = "liner never writes tags" },
+]
